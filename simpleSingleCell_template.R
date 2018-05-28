@@ -1,8 +1,9 @@
 #==============================================================================================
 #
-#                      Analyzing single-cell RNA-seq data containing UMI counts
+#                    1.Analyzing single-cell RNA-seq data containing UMI counts
 #
 #==============================================================================================
+## updated in 2018-05-25, R version: 3.5.0
 setwd('/Users/mijiarui/Nature_Biotechnology_Paper/simpleSingleCell')
 library(simpleSingleCell)
 
@@ -315,3 +316,77 @@ plotHeatmap(sce, features=top.markers, columns=order(my.clusters),
 # analyses are to be performed, it would be inconvenient to have to repeat all of the pre-processing 
 # steps described above.
 saveRDS(file="brain_data.rds", sce)
+
+
+#==============================================================================================
+#
+#                   2. Analyzing single-cell RNA-seq data containing read counts
+#
+#==============================================================================================
+
+############################################ Overview ############################################
+
+# In this workflow, we use a relatively simple dataset (Lun et al. 2017) to introduce most of the 
+# concepts of scRNA-seq data analysis. This dataset contains two plates of 416B cells (an immortalized 
+# mouse myeloid progenitor cell line), processed using the Smart-seq2 protocol (Picelli et al. 2014). 
+# A constant amount of spike-in RNA from the External RNA Controls Consortium (ERCC) was also added to 
+# each cell’s lysate prior to library preparation. High-throughput sequencing was performed and the 
+# expression of each gene was quantified by counting the total number of reads mapped to its exonic 
+# regions. Similarly, the quantity of each spike-in transcript was measured by counting the number of 
+# reads mapped to the spike-in reference sequences. 
+
+##################################### Setting up the data #####################################
+# One matrix was generated for each plate of cells used in the study.
+# unzip("E-MTAB-5522.processed.1.zip"). Unzip once. 这里我们关注标明“Calero”的数据集
+# Reading in the count tables for each of the two plates.
+plate1 <- read.delim("counts_Calero_20160113.tsv", 
+                     header=TRUE, row.names=1, check.names=FALSE)
+plate2 <- read.delim("counts_Calero_20160325.tsv", 
+                     header=TRUE, row.names=1, check.names=FALSE)
+head(plate1[1:5,1:5])
+gene.lengths <- plate1$Length # First column is the gene length.
+plate1 <- as.matrix(plate1[,-1]) # Discarding gene length (as it is not a cell).
+plate2 <- as.matrix(plate2[,-1])
+rbind(Plate1=dim(plate1), Plate2=dim(plate2))
+
+# We combine the two matrices into a single object for further processing. This is done after 
+# verifying that the genes are in the same order between the two matrices.
+stopifnot(identical(rownames(plate1), rownames(plate2)))
+all.counts <- cbind(plate1, plate2)
+
+# For convenience, the count matrix is stored in a SingleCellExperiment object from the SingleCellExperiment 
+# package. This allows different types of row- and column-level metadata to be stored alongside the 
+# counts for synchronized manipulation throughout the workflow.
+library(SingleCellExperiment)
+sce <- SingleCellExperiment(list(counts=all.counts))
+rowData(sce)$GeneLength <- gene.lengths
+sce
+
+# We identify the rows corresponding to ERCC spike-in transcripts from the row names. We store this 
+# information in the SingleCellExperiment object for future use. This is necessary as spike-ins 
+# require special treatment in downstream steps such as normalization.
+isSpike(sce, "ERCC") <- grepl("^ERCC", rownames(sce))
+summary(isSpike(sce, "ERCC"))
+
+# This dataset is slightly unusual in that it contains information from another set of spike-in 
+# transcripts, the Spike-In RNA Variants (SIRV) set. For simplicity, we will only use the ERCC 
+# spike-ins in this analysis. Thus, we must remove the rows corresponding to the SIRV transcripts 
+# prior to further analysis, which can be done simply by subsetting the  SingleCellExperiment object.
+is.sirv <- grepl("^SIRV", rownames(sce))
+sce <- sce[!is.sirv,] 
+summary(is.sirv)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
