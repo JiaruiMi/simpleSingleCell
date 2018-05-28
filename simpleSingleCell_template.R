@@ -131,7 +131,34 @@ plotQC(sce, type = "highest-expression", n=50) + fontsize # 这步非常耗时�
 ave.counts <- calcAverage(sce, use_size_factors=FALSE)
 hist(log10(ave.counts), breaks=100, main="Histogram of log-average counts for all genes in the brain dataset", 
      col="grey", xlab=expression(Log[10]~"average count"))
-?hist
+
+# We save the average counts into the SingleCellExperiment object for later use. We also remove genes that have 
+# average counts of zero, as this means that they are not expressed in any cell.
+rowData(sce)$ave.count <- ave.counts
+to.keep <- ave.counts > 0
+sce <- sce[to.keep,]
+summary(to.keep)
+
+
+############################## Normalization of cell-specific biases ##############################
+# For endogenous genes, normalization is performed using the computeSumFactors function as previously described. 
+# Here, we cluster similar cells together and normalize the cells in each cluster using the deconvolution method 
+# (Lun, Bach, and Marioni 2016). This improves normalization accuracy by reducing the number of DE genes between 
+# cells in the same cluster. Scaling is then performed to ensure that size factors of cells in different clusters 
+# are comparable.
+clusters <- quickCluster(sce, min.mean=0.1, method="igraph")
+sce <- computeSumFactors(sce, cluster=clusters, min.mean=0.1)
+summary(sizeFactors(sce))
+
+
+
+
+
+
+
+
+
+
 
 
 
