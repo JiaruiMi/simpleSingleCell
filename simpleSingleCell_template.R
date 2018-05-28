@@ -116,6 +116,22 @@ library(scran)
 mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", package="scran")) # 目前有人和小鼠的数据，暂无zebrafish的数据
 assignments <- cyclone(sce, mm.pairs, gene.names=rowData(sce)$ENSEMBL) # 这一步很耗时
 table(assignments$phase)
+par(mfrow = c(1,1), mar = c(5,5,3,2))
 plot(assignments$score$G1, assignments$score$G2M, xlab="G1 score", ylab="G2/M score", pch=16)
+
+#################################### Examining gene-level metrics ####################################
+# Figure 3 shows the most highly expressed genes across the cell population in the brain dataset. This is 
+# mostly occupied by spike-in transcripts, reflecting the use of spike-in concentrations that span the entire 
+# range of expression. There are also a number of constitutively expressed genes, as expected.
+fontsize <- theme(axis.text=element_text(size=12), axis.title=element_text(size=16))
+plotQC(sce, type = "highest-expression", n=50) + fontsize # 这步非常耗时，导出图片也非常耗时
+
+# Gene abundance is quantified by computing the average count across all cells (Figure 4). As previously 
+# mentioned, the UMI count is generally lower than the read count.
+ave.counts <- calcAverage(sce, use_size_factors=FALSE)
+hist(log10(ave.counts), breaks=100, main="Histogram of log-average counts for all genes in the brain dataset", 
+     col="grey", xlab=expression(Log[10]~"average count"))
+?hist
+
 
 
