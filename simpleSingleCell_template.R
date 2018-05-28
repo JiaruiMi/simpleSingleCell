@@ -377,16 +377,247 @@ sce <- sce[!is.sirv,]
 summary(is.sirv)
 
 
+metadata <- read.delim("E-MTAB-5522.sdrf.txt", check.names=FALSE, header=TRUE)
+m <- match(colnames(sce), metadata[["Source Name"]]) # Enforcing identical order.
+stopifnot(all(!is.na(m))) # Checking that nothing's missing.
+metadata <- metadata[m,]
+head(colnames(metadata))
+
+
+colData(sce)$Plate <- factor(metadata[["Factor Value[block]"]])
+pheno <- metadata[["Factor Value[phenotype]"]]
+levels(pheno) <- c("induced", "control")
+colData(sce)$Oncogene <- pheno
+table(colData(sce)$Oncogene, colData(sce)$Plate)
 
 
 
 
 
+library(org.Mm.eg.db)
+symb <- mapIds(org.Mm.eg.db, keys=rownames(sce), keytype="ENSEMBL", column="SYMBOL")
+rowData(sce)$ENSEMBL <- rownames(sce)
+rowData(sce)$SYMBOL <- symb
+head(rowData(sce))
+
+new.names <- rowData(sce)$SYMBOL
+missing.name <- is.na(new.names)
+new.names[missing.name] <- rowData(sce)$ENSEMBL[missing.name]
+dup.name <- new.names %in% new.names[duplicated(new.names)]
+new.names[dup.name] <- paste0(new.names, "_", rowData(sce)$ENSEMBL)[dup.name]
+rownames(sce) <- new.names
+head(rownames(sce))
+
+library(TxDb.Mmusculus.UCSC.mm10.ensGene)
+location <- mapIds(TxDb.Mmusculus.UCSC.mm10.ensGene, keys=rowData(sce)$ENSEMBL, 
+                   column="CDSCHROM", keytype="GENEID")
+rowData(sce)$CHR <- location
+summary(location=="chrM")
+
+
+##################################### Quality control on the cells #####################################
+library(scater)
+mito <- which(rowData(sce)$CHR=="chrM")
+sce <- calculateQCMetrics(sce, feature_controls=list(Mt=mito))
+head(colnames(colData(sce)), 10)
+
+
+sce$PlateOnco <- paste0(sce$Oncogene, ".", sce$Plate)
+multiplot(
+  plotColData(sce, y="total_counts", x="PlateOnco"),
+  plotColData(sce, y="total_features", x="PlateOnco"),
+  plotColData(sce, y="pct_counts_ERCC", x="PlateOnco"),
+  plotColData(sce, y="pct_counts_Mt", x="PlateOnco"),
+  cols=2)
+
+
+par(mfrow=c(1,3))
+plot(sce$total_features, sce$total_counts/1e6, xlab="Number of expressed genes",
+     ylab="Library size (millions)")
+plot(sce$total_features, sce$pct_counts_ERCC, xlab="Number of expressed genes",
+     ylab="ERCC proportion (%)")
+plot(sce$total_features, sce$pct_counts_Mt, xlab="Number of expressed genes",
+     ylab="Mitochondrial proportion (%)")
 
 
 
+libsize.drop <- isOutlier(sce$total_counts, nmads=3, type="lower", 
+                          log=TRUE, batch=sce$PlateOnco)
+feature.drop <- isOutlier(sce$total_features, nmads=3, type="lower", 
+                          log=TRUE, batch=sce$PlateOnco)
+
+
+spike.drop <- isOutlier(sce$pct_counts_ERCC, nmads=3, type="higher",
+                        batch=sce$PlateOnco)
+
+
+keep <- !(libsize.drop | feature.drop | spike.drop)
+data.frame(ByLibSize=sum(libsize.drop), ByFeature=sum(feature.drop),
+           BySpike=sum(spike.drop), Remaining=sum(keep))
+
+
+sce$PassQC <- keep
+saveRDS(sce, file="416B_preQC.rds")
+sce <- sce[,keep]
+dim(sce)
 
 
 
+################################### Classification of cell cycle phase ###################################
+set.seed(100)
+library(scran)
+mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", 
+                                package="scran"))
+assignments <- cyclone(sce, mm.pairs, gene.names=rowData(sce)$ENSEMBL)
+
+par(mfrow = c(1,1))
+plot(assignments$score$G1, assignments$score$G2M, 
+     xlab="G1 score", ylab="G2/M score", pch=16)
+
+sce$phases <- assignments$phases
+table(sce$phases)
 
 
+################################### Examining gene-level expression metrics ###################################
+fontsize <- theme(axis.text=element_text(size=12), axis.title=element_text(size=16))
+plotQC(sce, type = "highest-expression", n=50) + fontsize
+
+ave.counts <- calcAverage(sce, use_size_factors=FALSE)
+hist(log10(ave.counts), breaks=100, main="", col="grey80", 
+     xlab=expression(Log[10]~"average count"))
+
+demo.keep <- ave.counts >= 1
+filtered.sce <- sce[demo.keep,]
+summary(demo.keep)
+
+
+num.cells <- nexprs(sce, byrow=TRUE)
+smoothScatter(log10(ave.counts), num.cells, ylab="Number of cells", 
+              xlab=expression(Log[10]~"average count"))
+
+
+to.keep <- num.cells > 0
+sce <- sce[to.keep,]
+summary(to.keep)
+
+
+############################## Normalization of cell-specific biases ##############################
+sce <- computeSumFactors(sce)
+summary(sizeFactors(sce))
+
+plot(sce$total_counts/1e6, sizeFactors(sce), log="xy",
+     xlab="Library size (millions)", ylab="Size factor",
+     col=c("red", "black")[sce$Oncogene], pch=16)
+legend("bottomright", col=c("red", "black"), pch=16, cex=1.2,
+       legend=levels(sce$Oncogene))
+
+sce <- computeSpikeFactors(sce, type="ERCC", general.use=FALSE)
+
+sce <- normalize(sce)
+
+
+########################### Modelling the technical noise in gene expression ###########################
+var.fit <- trendVar(sce, parametric=TRUE, block=sce$Plate,
+                    loess.args=list(span=0.3))
+var.out <- decomposeVar(sce, var.fit)
+head(var.out)
+
+
+plot(var.out$mean, var.out$total, pch=16, cex=0.6, xlab="Mean log-expression", 
+     ylab="Variance of log-expression")
+curve(var.fit$trend(x), col="dodgerblue", lwd=2, add=TRUE)
+cur.spike <- isSpike(sce)
+points(var.out$mean[cur.spike], var.out$total[cur.spike], col="red", pch=16)
+
+chosen.genes <- order(var.out$bio, decreasing=TRUE)[1:10]
+plotExpression(sce, features=rownames(var.out)[chosen.genes]) + fontsize
+
+
+################################ Removing the batch effect ################################
+library(limma)
+assay(sce, "corrected") <- removeBatchEffect(logcounts(sce), 
+                                             design=model.matrix(~sce$Oncogene), batch=sce$Plate)
+assayNames(sce)
+
+
+############################## Denoising expression values using PCA ##############################
+sce <- denoisePCA(sce, technical=var.fit$trend, assay.type="corrected")
+dim(reducedDim(sce, "PCA")) 
+
+
+sce2 <- denoisePCA(sce, technical=var.fit$trend, 
+                   assay.type="corrected", value="lowrank") 
+assayNames(sce2)
+
+
+
+######################## Data exploration with dimensionality reduction #######################
+plotReducedDim(sce, use_dimred="PCA", ncomponents=3, 
+               colour_by="Oncogene") + fontsize
+
+plotReducedDim(sce, use_dimred="PCA", ncomponents=3, 
+               colour_by="Plate") + fontsize
+
+
+
+run_args <- list(rand_seed=100, use_dimred="PCA")
+out5 <- plotTSNE(sce, run_args=c(run_args, perplexity=5),
+                 colour_by="Oncogene") + fontsize + ggtitle("Perplexity = 5")
+
+out10 <- plotTSNE(sce, run_args=c(run_args, perplexity=10),
+                  colour_by="Oncogene") + fontsize + ggtitle("Perplexity = 10")
+
+out20 <- plotTSNE(sce, run_args=c(run_args, perplexity=20),
+                  colour_by="Oncogene") + fontsize + ggtitle("Perplexity = 20")
+
+multiplot(out5, out10, out20, cols=3)
+
+
+######################## Clustering cells into putative subpopulations ########################
+pcs <- reducedDim(sce, "PCA")
+my.dist <- dist(pcs)
+my.tree <- hclust(my.dist, method="ward.D2")
+
+library(dynamicTreeCut)
+my.clusters <- unname(cutreeDynamic(my.tree, distM=as.matrix(my.dist), 
+                                    minClusterSize=10, verbose=0))
+
+table(my.clusters, sce$Plate)
+
+
+sce$cluster <- factor(my.clusters)
+plotTSNE(sce, run_args=list(use_dimred="PCA", perplexity=20, 
+                            rand_seed=200), colour_by="cluster") + fontsize
+
+
+library(cluster)
+clust.col <- scater:::.get_palette("tableau10medium") # hidden scater colours
+sil <- silhouette(my.clusters, dist = my.dist)
+sil.cols <- clust.col[ifelse(sil[,3] > 0, sil[,1], sil[,2])]
+sil.cols <- sil.cols[order(-sil[,1], sil[,3])]
+plot(sil, main = paste(length(unique(my.clusters)), "clusters"), 
+     border=sil.cols, col=sil.cols, do.col.sort=FALSE) 
+
+
+markers <- findMarkers(sce, my.clusters, block=sce$Plate)
+
+
+marker.set <- markers[["1"]]
+head(marker.set, 10)
+
+
+write.table(marker.set, file="416B_marker_1.tsv", sep="\t", 
+            quote=FALSE, row.names=FALSE)
+
+
+
+top.markers <- rownames(marker.set)[marker.set$Top <= 10]
+plotHeatmap(sce, features=top.markers, columns=order(sce$cluster), 
+            colour_columns_by=c("cluster", "Plate", "Oncogene"),
+            cluster_cols=FALSE, center=TRUE, symmetric=TRUE, zlim=c(-5, 5))
+            
+
+
+#################################### Concluding remarks ####################################
+saveRDS(file="416B_data.rds", sce)
+            
