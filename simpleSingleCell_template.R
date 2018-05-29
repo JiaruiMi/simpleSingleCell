@@ -620,4 +620,141 @@ plotHeatmap(sce, features=top.markers, columns=order(sce$cluster),
 
 #################################### Concluding remarks ####################################
 saveRDS(file="416B_data.rds", sce)
-            
+
+
+
+
+
+#==============================================================================================
+#
+#                3. Further strategies for analyzing single-cell RNA-seq data
+#
+#==============================================================================================
+
+######################################### Overview #########################################
+# The previous workflows focused on analyzing single-cell RNA-seq data with “standard” procedures. 
+# However, a number of alternative parameter settings and strategies can be used at some steps of the 
+# workflow. This workflow describes a few of these alternative settings as well as the rationale 
+# behind choosing them instead of the defaults.
+
+
+##################################### Quality control on cells #####################################
+
+
+# Checking for discarded cell types
+## We can diagnose loss of distinct cell types during QC by looking for differences in gene expression 
+## between the discarded and retained cells (Figure 1). If the discarded pool is enriched for a 
+## certain cell type, we should observe increased expression of the corresponding marker genes. No 
+## systematic upregulation of genes is apparent in the discarded pool in Figure 1, indicating that 
+## the QC step did not inadvertently filter out a cell type in the 416B dataset.
+library(SingleCellExperiment)
+sce.full.416b <- readRDS("416B_preQC.rds")
+
+library(scater)
+suppressWarnings({
+  lost <- calcAverage(counts(sce.full.416b)[,!sce.full.416b$PassQC])
+  kept <- calcAverage(counts(sce.full.416b)[,sce.full.416b$PassQC])
+})
+logfc <- log2((lost+1)/(kept+1))
+head(sort(logfc, decreasing=TRUE), 20)
+
+
+# Each point represents a gene, with spike-in and mitochondrial transcripts in red and blue respectively.
+plot(lost, kept, xlab="Average count (discarded)", 
+     ylab="Average count (retained)", log="xy", pch=16, 
+     main = 'Average counts across all discarded and retained cells in the 416B dataset')
+is.spike <- isSpike(sce.full.416b)
+points(lost[is.spike], kept[is.spike], col="red", pch=16)
+is.mito <- rowData(sce.full.416b)$is_feature_control_Mt
+points(lost[is.mito], kept[is.mito], col="dodgerblue", pch=16)
+
+
+# By comparison, a more stringent filter in the PBMC dataset would remove the previously identified 
+# platelet population (see the previous workflow). This manifests in Figure 2 as a shift to the 
+# bottom-right for a number of genes, including PF4 and PPBP.
+sce.pbmc <- readRDS("pbmc_data.rds")
+wrong.keep <- sce.pbmc$total_counts >= 1000
+suppressWarnings({
+  lost <- calcAverage(counts(sce.pbmc)[,!wrong.keep])
+  kept <- calcAverage(counts(sce.pbmc)[,wrong.keep])
+})
+logfc <- log2((lost+1)/(kept+1))
+head(sort(logfc, decreasing=TRUE), 20)
+
+
+plot(lost, kept, xlab="Average count (discarded)", 
+     ylab="Average count (retained)", log="xy", pch=16)
+platelet <- c("PF4", "PPBP", "SDPR")
+points(lost[platelet], kept[platelet], col="orange", pch=16)
+
+
+# Using PCA-based outliers
+# Another strategy is to perform a principal components analysis (PCA) based on the quality metrics 
+# for each cell, e.g., the total number of reads, the total number of features and the proportion of 
+# mitochondrial or spike-in reads. Outliers on a PCA plot may be indicative of low-quality cells that 
+# have aberrant technical properties compared to the (presumed) majority of high-quality cells. This 
+# is demonstrated below on a brain cell dataset from Tasic et al. (2016), using functions from the 
+# scater package (McCarthy et al. 2017).
+
+# Obtaining the dataset.
+library(scRNAseq)
+data(allen)
+
+# Setting up the data.
+sce.allen <- as(allen, "SingleCellExperiment")
+assayNames(sce.allen) <- "counts"
+isSpike(sce.allen, "ERCC") <- grep("ERCC", rownames(sce.allen))
+
+# Computing the QC metrics and running PCA.
+library(scater)
+sce.allen <- calculateQCMetrics(sce.allen)
+sce.allen <- runPCA(sce.allen, use_coldata=TRUE, detect_outliers=TRUE)
+table(sce.allen$outlier)
+
+
+################################## Normalizing based on spike-in coverage ##################################
+
+
+###################################### Detecting highly variable genes #####################################
+
+
+################################# Advanced modelling of the technical noise ################################
+
+# Loading the saved object.
+sce.416B <- readRDS("416B_data.rds") 
+
+# Repeating the trendVar() call.
+var.fit <- trendVar(sce.416B, parametric=TRUE, block=sce.416B$Plate,
+                    loess.args=list(span=0.3))
+
+matplot(var.fit$means, var.fit$vars, col=c("darkorange", "forestgreen"))
+
+tmp.416B <- sce.416B
+tmp.416B$log_size_factor <- log(sizeFactors(sce.416B))
+plotColData(tmp.416B, x="Plate", y="log_size_factor")
+
+sce.416B.2 <- normalize(sce.416B, size_factor_grouping=sce.416B$Plate)
+comb.out <- multiBlockVar(sce.416B.2, block=sce.416B.2$Plate,
+                          trend.args=list(parametric=TRUE, loess.args=list(span=0.4)))
+
+head(comb.out[,1:6])
+
+par(mfrow=c(1,2))
+is.spike <- isSpike(sce.416B.2)
+for (plate in levels(sce.416B.2$Plate)) {
+  cur.out <- comb.out$per.block[[plate]]
+  plot(cur.out$mean, cur.out$total, pch=16, cex=0.6, xlab="Mean log-expression", 
+       ylab="Variance of log-expression", main=plate)
+  curve(metadata(cur.out)$trend(x), col="dodgerblue", lwd=2, add=TRUE)
+  points(cur.out$mean[is.spike], cur.out$total[is.spike], col="red", pch=16)
+}
+
+lfit <- trendVar(sce.416B, design=model.matrix(~sce.416B$Plate))
+######################### Identifying correlated gene pairs with Spearman’s rho #########################
+
+
+######################### Using parallel analysis to choose the number of PCs #########################
+set.seed(1000)
+npcs <- parallelPCA(sce.416B, assay.type="corrected", 
+                    subset.row=comb.out$bio > 0, value="n")
+as.integer(npcs)
