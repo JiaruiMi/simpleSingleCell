@@ -21,15 +21,242 @@ fname <- "pbmc4k/raw_gene_bc_matrices/GRCh38"
 sce <- read10xCounts(fname, col.names=TRUE)
 sce # assays里面只有counts一个slots
 
-# Here, each count represents the number of unique molecular identifiers (UMIs) assigned to a gene 
-# for a cell barcode. Note that the counts are loaded as a sparse matrix object - specifically, a 
-# dgCMatrix instance from the Matrix package. This avoids allocating memory to hold zero counts, 
-# which is highly memory-efficient for low-coverage scRNA-seq data.
-# 一般10X的方法是和UMI序列一起配合使用的。
+## Here, each count represents the number of unique molecular identifiers (UMIs) assigned to a gene 
+## for a cell barcode. Note that the counts are loaded as a sparse matrix object - specifically, a 
+## dgCMatrix instance from the Matrix package. This avoids allocating memory to hold zero counts, 
+## which is highly memory-efficient for low-coverage scRNA-seq data.
+## 一般10X的方法是和UMI序列一起配合使用的。一般来讲droplet-based methods是没有spike-in RNA的
 class(counts(sce))
 
+# Annotating the rows
+## We relabel the rows with the gene symbols for easier reading. This is done using the  
+## uniquifyFeatureNames() function, which ensures uniqueness in the case of duplicated or missing 
+## symbols.
+library(scater)
+rownames(sce) <- uniquifyFeatureNames(rowData(sce)$ID, rowData(sce)$Symbol)
+head(rownames(sce))
+
+## We also identify the chromosomal location for each gene. The mitochondrial location is particularly 
+## useful for later quality control.
+library(EnsDb.Hsapiens.v86)
+location <- mapIds(EnsDb.Hsapiens.v86, keys=rowData(sce)$ID, 
+                   column="SEQNAME", keytype="GENEID")
+rowData(sce)$CHR <- location
+summary(location=="MT")
 
 
+#################################### Calling cells from empty droplets ####################################
+# An interesting aspect of droplet-based data is that we have no prior knowledge about which droplets 
+# (i.e., cell barcodes) actually contain cells, and which are empty. Thus, we need to call cells from 
+# empty droplets based on the observed expression profiles. This is not entirely straightforward as 
+# empty droplets can contain ambient (i.e., extracellular) RNA that can be captured and sequenced. An 
+# examination of the distribution of total counts suggests a fairly sharp transition between barcodes 
+# with large and small total counts (Figure 1), probably corresponding to cell-containing and empty 
+# droplets respectively.
+bcrank <- barcodeRanks(counts(sce))
+
+# Only showing unique points for plotting speed.
+uniq <- !duplicated(bcrank$rank)
+par(mfrow = c(1,1))
+plot(bcrank$rank[uniq], bcrank$total[uniq], log="xy",
+     xlab="Rank", ylab="Total UMI count", cex.lab=1.2,
+     main = 'Total UMI count for each barcode in the PBMC dataset, plotted against its rank (in decreasing order of total counts)')
+
+abline(h=bcrank$inflection, col="darkgreen", lty=2)
+abline(h=bcrank$knee, col="dodgerblue", lty=2)
+
+legend("bottomleft", legend=c("Inflection", "Knee"), 
+       col=c("darkgreen", "dodgerblue"), lty=2, cex=1.2)
+
+
+# We use the emptyDrops() function to test whether the expression profile for each cell barcode is 
+# significantly different from the ambient pool (Lun et al. 2018). Any significant deviation indicates 
+# that the barcode corresponds to a cell-containing droplet. We call cells at a false discovery rate 
+# (FDR) of 1%, meaning that no more than 1% of our called barcodes should be empty droplets on average.
+set.seed(100)
+e.out <- emptyDrops(counts(sce))
+sum(e.out$FDR <= 0.01, na.rm=TRUE)
+
+# emptyDrops() computes Monte Carlo p-values, so it is important to set the random seed to obtain 
+# reproducible results. The number of Monte Carlo iterations also determines the lower bound for 
+# the _p_values. If any non-significant barcodes are TRUE for Limited, we may need to increase the 
+# number of iterations to ensure that they can be detected.
+table(Sig=e.out$FDR <= 0.01, Limited=e.out$Limited)
+# We then subset our SingleCellExperiment object to retain only the detected cells.
+# using which() to automatically remove NAs.
+sce <- sce[,which(e.out$FDR <= 0.01)]
+## emptyDrops() assumes that cell barcodes with total UMI counts below a certain threshold (default 
+## of 100) correspond to empty droplets, and uses them to estimate the ambient expression profile. By 
+## definition, these barcodes cannot be cell-containing droplets and are excluded from the hypothesis 
+## testing, hence the NAs in the output. 
+
+
+#################################### Quality control on the cells ####################################
+# The previous step only distinguishes cells from empty droplets, but makes no statement about the 
+# quality of the cells. It is entirely possible for droplets to contain damaged or dying cells, which 
+# need to be removed prior to downstream analysis. We compute some QC metrics using 
+# calculateQCMetrics() (McCarthy et al. 2017) and examine their distributions in Figure 2.
+sce <- calculateQCMetrics(sce, feature_controls=list(Mito=which(location=="MT")))
+par(mfrow=c(1,3))
+hist(sce$log10_total_counts, breaks=20, col="grey80",
+     xlab="Log-total UMI count")
+hist(sce$log10_total_features_by_counts, breaks=20, col="grey80",
+     xlab="Log-total number of expressed features")
+hist(sce$pct_counts_Mito, breaks=20, col="grey80",
+     xlab="Proportion of reads in mitochondrial genes")
+
+# Ideally, we would remove cells with low library sizes or total number of expressed features as 
+# described previously. However, this would likely remove cell types with low RNA content, 
+# especially in a heterogeneous PBMC population with many different cell types. Thus, we use a more 
+# relaxed strategy and only remove cells with large mitochondrial proportions, using it as a proxy 
+# for cell damage. (Keep in mind that droplet-based datasets usually do not have spike-in RNA.)
+high.mito <- isOutlier(sce$pct_counts_Mito, nmads=3, type="higher")
+sce <- sce[,!high.mito]
+summary(high.mito)
+
+## The above justification for using a more relaxed filter is largely retrospective. In practice, 
+## we may not know a priori the degree of population heterogeneity and whether it manifests in the 
+## QC metrics. We recommend performing the analysis first with a stringent QC filter, and then 
+## relaxing it based on further diagnostics (see here for an example). This is motivated by the fact 
+## that low-quality cells can often yield misleading results, clustering separately from other cells; 
+## containing genes that appear to be strongly “upregulated” due to the presence of very small size 
+## factors; containing genes that are strongly downregulated due to the loss of RNA upon cell damage; 
+## and distorting the characterization of population heterogeneity during variance estimation or PCA.
+
+
+##################################### Examining gene expression #####################################
+# The average expression of each gene is much lower here compared to the previous datasets (Figure 3). 
+# This is due to the reduced coverage per cell when thousands of cells are multiplexed together for 
+# sequencing.
+ave <- calcAverage(sce)
+rowData(sce)$AveCount <- ave
+par(mfrow = c(1,1))
+hist(log10(ave), col="grey80")
+
+# The set of most highly expressed genes is dominated by ribosomal protein and mitochondrial genes (Figure 4), as expected.
+plotHighestExprs(sce)
+
+
+################################## Normalizing for cell-specific biases ################################
+# We apply the deconvolution method to compute size factors for all cells (Lun, Bach, and Marioni 2016). 
+# We perform some pre-clustering to break up obvious clusters and avoid pooling cells that are very 
+# different.
+library(scran)
+clusters <- quickCluster(sce, method="igraph", min.mean=0.1,
+                         irlba.args=list(maxit=1000)) # for convergence.
+table(clusters)
+
+sce <- computeSumFactors(sce, min.mean=0.1, cluster=clusters)
+summary(sizeFactors(sce))
+
+# The size factors are well correlated against the library sizes (Figure 5), indicating that capture 
+# efficiency and sequencing depth are the major biases.
+plot(sce$total_counts, sizeFactors(sce), log="xy")
+
+# Finally, we compute normalized log-expresion values. There is no need to call  computeSpikeFactors() 
+# here, as there are no spike-in transcripts available.
+sce <- normalize(sce)
+
+
+#################################### Modelling the mean-variance trend ####################################
+# The lack of spike-in transcripts complicates the modelling of the technical noise. One option is to 
+#assume that most genes do not exhibit strong biological variation, and to fit a trend to the 
+# variances of endogenous genes. However, this assumption is generally unreasonable for a heterogeneous 
+# population. Instead, we assume that the technical noise is Poisson and create a fitted trend on that 
+# basis using the makeTechTrend() function.
+new.trend <- makeTechTrend(x=sce)
+
+# We estimate the variances for all genes and compare the trend fits in Figure 6. The Poisson-based 
+# trend serves as a lower bound for the variances of the endogenous genes, consistent with non-zero 
+# biological components.
+# The blue line represents the mean-dependent trend fitted to the variances, while the red line 
+# represents the Poisson noise.
+fit <- trendVar(sce, use.spikes=FALSE, loess.args=list(span=0.05))
+plot(fit$mean, fit$var, pch=16)
+curve(fit$trend(x), col="dodgerblue", add=TRUE)
+curve(new.trend(x), col="red", add=TRUE)
+
+# We decompose the variance for each gene using the Poisson-based trend, and examine the genes with 
+# the highest biological components.
+fit0 <- fit
+fit$trend <- new.trend
+dec <- decomposeVar(fit=fit)
+top.dec <- dec[order(dec$bio, decreasing=TRUE),] 
+head(top.dec)
+
+# We can plot the genes with the largest biological components, to verify that they are indeed highly 
+# variable (Figure 7). Distributions of normalized log-expression values for the top 10 genes with the 
+# largest biological components in the PBMC dataset. Each point represents the log-expression value in 
+# a single cell.
+plotExpression(sce, features=rownames(top.dec)[1:10])
+
+
+#################################### Dimensionality reduction ####################################
+# We use the denoisePCA() function with the assumed Poisson technical trend, to choose the number of 
+# dimensions to retain after PCA. The red line represents the chosen number of PCs.
+sce <- denoisePCA(sce, technical=new.trend, approx=TRUE)
+ncol(reducedDim(sce, "PCA"))
+
+plot(attr(reducedDim(sce), "percentVar"), xlab="PC",
+     ylab="Proportion of variance explained")
+abline(v=ncol(reducedDim(sce, "PCA")), lty=2, col="red")
+
+# Examination of the first few PCs already reveals some strong substructure in the data (Figure 9).
+# Pairwise PCA plots of the first three PCs in the PBMC dataset, constructed from normalized 
+# log-expression values of genes with positive biological components.
+# Each point represents a cell, coloured by the log-number of expressed features.
+plotPCA(sce, ncomponents=3, colour_by="log10_total_features_by_counts")
+
+# This is recapitulated with a t-SNE plot (Figure 10). Again, note that we set use_dimred= to perform 
+# t-SNE on the denoised expression matrix. Each point represents a cell and is coloured according to 
+# the log-number of expressed features.
+sce <- runTSNE(sce, use_dimred="PCA", perplexity=30, rand_seed=100)
+plotTSNE(sce, colour_by="log10_total_features_by_counts")
+
+#################################### Clustering with graph-based methods ####################################
+# We build a shared nearest neighbour graph (Xu and Su 2015) and use the Walktrap algorithm to 
+# identify clusters.\
+snn.gr <- buildSNNGraph(sce, use.dimred="PCA")
+clusters <- igraph::cluster_walktrap(snn.gr)
+sce$Cluster <- factor(clusters$membership)
+table(sce$Cluster)
+
+# We look at the ratio of the observed and expected edge weights to confirm that the clusters are 
+# modular. (We don’t look at the modularity score itself, as that varies by orders of magnitudes 
+# across clusters and is difficult to interpret.) Figure 11 indicates that most of the clusters 
+# are well seperated, with few strong off-diagonal entries.
+cluster.mod <- clusterModularity(snn.gr, sce$Cluster, get.values=TRUE)
+log.ratio <- log2(cluster.mod$observed/cluster.mod$expected + 1)
+
+library(pheatmap)
+pheatmap(log.ratio, cluster_rows=FALSE, cluster_cols=FALSE, 
+         color=colorRampPalette(c("white", "blue"))(100))
+
+# We examine the cluster identities on a t-SNE plot (Figure 12) to confirm that different clusters 
+# are indeed separated.
+plotTSNE(sce, colour_by="Cluster")
+
+
+
+######################################## Marker gene detection ######################################
+# We detect marker genes for each cluster using findMarkers(). Again, we only look at upregulated 
+# genes in each cluster, as these are more useful for positive identification of cell types in a 
+# heterogeneous population.
+markers <- findMarkers(sce, clusters=sce$Cluster, direction="up")
+# We examine the markers for cluster 1 in more detail. The upregulation of genes such as PF4 and 
+# PPBP suggests that cluster 1 contains platelets or their precursors.
+marker.set <- markers[["1"]]
+head(marker.set[,1:8], 10) # only first 8 columns, for brevity
+
+# This is confirmed in Figure 13, where the transcriptional profile of cluster 1 is clearly distinct 
+# from the others.
+chosen <- rownames(marker.set)[marker.set$Top <= 10]
+plotHeatmap(sce, features=chosen, exprs_values="logcounts", 
+            zlim=5, center=TRUE, symmetric=TRUE, cluster_cols=FALSE,
+            colour_columns_by="Cluster", columns=order(sce$Cluster))
+
+######################################## Concluding remarks ########################################
+saveRDS(sce, file="pbmc_data.rds")
 
 
 #==============================================================================================
