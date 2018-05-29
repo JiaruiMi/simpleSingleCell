@@ -1,5 +1,39 @@
 #==============================================================================================
 #
+#             0.Analyzing single-cell RNA sequencing data from droplet-based protocols
+#
+#==============================================================================================
+######################################### Overview ##########################################
+# 可以在10X的官网“https://support.10xgenomics.com/single-cell-gene-expression/datasets/2.1.0/pbmc4k”
+# 下载数据
+
+####################################### Setting up the data #######################################
+# Reading in a sparse matrix
+## We load in the raw count matrix using the read10xCounts() function from the DropletUtils package. 
+## This will create a SingleCellExperiment object where each column corresponds to a cell barcode.
+untar("pbmc4k_raw_gene_bc_matrices.tar.gz", exdir="pbmc4k")
+
+## 我们看到10X的数据解压以后是一个文件夹，进入文件夹有三个文件分别是“barcodes.tsv", "genes.tsc", "matrix.mtx"
+## 一般10X的数据可以使用Seurat(适合大量细胞)，当然在细胞数有限的情况下考虑使用SingleCellExperiment对象
+## 和Scater包也是可以一样处理的，在这里我们使用scater
+library(DropletUtils)
+fname <- "pbmc4k/raw_gene_bc_matrices/GRCh38"
+sce <- read10xCounts(fname, col.names=TRUE)
+sce # assays里面只有counts一个slots
+
+# Here, each count represents the number of unique molecular identifiers (UMIs) assigned to a gene 
+# for a cell barcode. Note that the counts are loaded as a sparse matrix object - specifically, a 
+# dgCMatrix instance from the Matrix package. This avoids allocating memory to hold zero counts, 
+# which is highly memory-efficient for low-coverage scRNA-seq data.
+# 一般10X的方法是和UMI序列一起配合使用的。
+class(counts(sce))
+
+
+
+
+
+#==============================================================================================
+#
 #                    1.Analyzing single-cell RNA-seq data containing UMI counts
 #
 #==============================================================================================
