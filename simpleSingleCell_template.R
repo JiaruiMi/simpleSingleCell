@@ -596,6 +596,13 @@ saveRDS(file="brain_data.rds", sce)
 # regions. Similarly, the quantity of each spike-in transcript was measured by counting the number of 
 # reads mapped to the spike-in reference sequences. 
 
+# 注意，在上游数据处理的时候：
+# Some feature-counting tools will report mapping statistics in the count matrix (e.g., the number of 
+# unaligned or unassigned reads). While these values can be useful for quality control, they would be 
+# misleading if treated as gene expression values. Thus, they should be removed (or at least moved to 
+# the colData) prior to further analyses.
+
+
 ##################################### Setting up the data #####################################
 # One matrix was generated for each plate of cells used in the study.
 # unzip("E-MTAB-5522.processed.1.zip"). Unzip once. 这里我们关注标明“Calero”的数据集
@@ -627,6 +634,11 @@ sce # assays中只有一个slot，是'counts'
 # We identify the rows corresponding to ERCC spike-in transcripts from the row names. We store this 
 # information in the SingleCellExperiment object for future use. This is necessary as spike-ins 
 # require special treatment in downstream steps such as normalization.
+# 一个很小的注意事项，在使用正则表达式去除ERCC spike-in的时候：
+# Be aware of using the ^ERCC regular expression for human data where the row names of the count 
+# matrix are gene symbols. An ERCC gene family actually exists in human annotation, so this would 
+# result in incorrect identification of genes as spike-in transcripts. This problem can be avoided by 
+# publishing count matrices with standard identifiers (e.g., Ensembl, Entrez).
 isSpike(sce, "ERCC") <- grepl("^ERCC", rownames(sce)) # isSpike是sce这个SingleCellExperiment对象中的一个单元
 row.names(sce)[grepl("^ERCC", rownames(sce))] # 可以用这句代码来查看ERCC的标签
 summary(isSpike(sce, "ERCC")) # 或者用table函数也可以
