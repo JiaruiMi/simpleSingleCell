@@ -600,6 +600,7 @@ saveRDS(file="brain_data.rds", sce)
 # One matrix was generated for each plate of cells used in the study.
 # unzip("E-MTAB-5522.processed.1.zip"). Unzip once. 这里我们关注标明“Calero”的数据集
 # Reading in the count tables for each of the two plates.
+setwd('/Users/mijiarui/Nature_Biotechnology_Paper/simpleSingleCell')
 plate1 <- read.delim("counts_Calero_20160113.tsv", 
                      header=TRUE, row.names=1, check.names=FALSE)
 plate2 <- read.delim("counts_Calero_20160325.tsv", 
@@ -608,7 +609,7 @@ head(plate1[1:5,1:5])
 gene.lengths <- plate1$Length # First column is the gene length.
 plate1 <- as.matrix(plate1[,-1]) # Discarding gene length (as it is not a cell).
 plate2 <- as.matrix(plate2[,-1])
-rbind(Plate1=dim(plate1), Plate2=dim(plate2))
+rbind(Plate1=dim(plate1), Plate2=dim(plate2)) # 两个文件中均有96个细胞，检测46703个基因
 
 # We combine the two matrices into a single object for further processing. This is done after 
 # verifying that the genes are in the same order between the two matrices.
@@ -619,24 +620,26 @@ all.counts <- cbind(plate1, plate2)
 # package. This allows different types of row- and column-level metadata to be stored alongside the 
 # counts for synchronized manipulation throughout the workflow.
 library(SingleCellExperiment)
-sce <- SingleCellExperiment(list(counts=all.counts))
+sce <- SingleCellExperiment(list(counts=all.counts)) # 构建SingleCellExperiment对象的时候最少只需要输入矩阵信息
 rowData(sce)$GeneLength <- gene.lengths
-sce
+sce # assays中只有一个slot，是'counts'
 
 # We identify the rows corresponding to ERCC spike-in transcripts from the row names. We store this 
 # information in the SingleCellExperiment object for future use. This is necessary as spike-ins 
 # require special treatment in downstream steps such as normalization.
-isSpike(sce, "ERCC") <- grepl("^ERCC", rownames(sce))
-summary(isSpike(sce, "ERCC"))
+isSpike(sce, "ERCC") <- grepl("^ERCC", rownames(sce)) # isSpike是sce这个SingleCellExperiment对象中的一个单元
+row.names(sce)[grepl("^ERCC", rownames(sce))] # 可以用这句代码来查看ERCC的标签
+summary(isSpike(sce, "ERCC")) # 或者用table函数也可以
 
 # This dataset is slightly unusual in that it contains information from another set of spike-in 
 # transcripts, the Spike-In RNA Variants (SIRV) set. For simplicity, we will only use the ERCC 
 # spike-ins in this analysis. Thus, we must remove the rows corresponding to the SIRV transcripts 
 # prior to further analysis, which can be done simply by subsetting the  SingleCellExperiment object.
 is.sirv <- grepl("^SIRV", rownames(sce))
+rownames(sce)[is.sirv] # 可以用这句代码来查看以‘SIRV’开头的另一套spike-in标签
 sce <- sce[!is.sirv,] 
 summary(is.sirv)
-
+sce # SIRV不是常规使用的spike-in，所以在SingleCellExperiment对象中并没有对应的存储单元
 
 metadata <- read.delim("E-MTAB-5522.sdrf.txt", check.names=FALSE, header=TRUE)
 m <- match(colnames(sce), metadata[["Source Name"]]) # Enforcing identical order.
