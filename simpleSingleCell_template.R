@@ -653,29 +653,50 @@ sce <- sce[!is.sirv,]
 summary(is.sirv)
 sce # SIRV不是常规使用的spike-in，所以在SingleCellExperiment对象中并没有对应的存储单元
 
+
+# Incorporating cell-based annotation
+# We load in the metadata for each library/cell from the sdrf.txt file. It is important to check that 
+# the rows of the metadata table are in the same order as the columns of the count matrix. Otherwise, 
+# incorrect metadata will be assigned to each cell. metadata的列名和matrix的行名必须完全一致，尤其是顺序。
 metadata <- read.delim("E-MTAB-5522.sdrf.txt", check.names=FALSE, header=TRUE)
-m <- match(colnames(sce), metadata[["Source Name"]]) # Enforcing identical order.
+head(metadata) # 在这个文件中，metadata的行名存储在列名为“Source Name"(实际为第一列)
+m <- match(colnames(sce), metadata[["Source Name"]]) # Enforcing identical order，检测是否匹配
 stopifnot(all(!is.na(m))) # Checking that nothing's missing.
 metadata <- metadata[m,]
 head(colnames(metadata))
+dim(metadata)  # 我们看到metadata中的信息（列数）非常多，注意目前只是存储在一个名为metadata的中间变量
 
 
+# We only retain relevant metadata fields to avoid storing unnecessary information in the  colData 
+# of the SingleCellExperiment object. In particular, we keep the plate of origin (i.e., block) and 
+# phenotype of each cell. The second field is relevant as all of the cells contain a CBFB-MYH11 
+# oncogene, but the expression of this oncogene is only induced in a subset of the cells.
 colData(sce)$Plate <- factor(metadata[["Factor Value[block]"]])
 pheno <- metadata[["Factor Value[phenotype]"]]
-levels(pheno) <- c("induced", "control")
+levels(pheno) <- c("induced", "control") # 根据因子型变量的首字母在字母表中的顺序
 colData(sce)$Oncogene <- pheno
 table(colData(sce)$Oncogene, colData(sce)$Plate)
 
-
-
-
-
+# Incorporating gene-based annotation
+# Feature-counting tools typically report genes in terms of standard identifiers from Ensembl or 
+# Entrez. These identifiers are used as they are unambiguous and highly stable. However, they are 
+# difficult to interpret compared to the gene symbols which are more commonly used in the literature. 
+# Given the Ensembl identifiers, we obtain the corresponding gene symbols using annotation packages 
+# like org.Mm.eg.db. 定量分析软件一般使用Ensembl或者Entrez基因id，但是为了方便阅读，需要转换成gene symbol
+# 这一步转化工作可以使用注释包，例如：org.Mm.eg.db; 如果是斑马鱼的，则是org.Dr.eg.db
 library(org.Mm.eg.db)
-symb <- mapIds(org.Mm.eg.db, keys=rownames(sce), keytype="ENSEMBL", column="SYMBOL")
+symb <- mapIds(org.Mm.eg.db, keys=rownames(sce), keytype="ENSEMBL", column="SYMBOL") # 类似于键值对的概念；
+## 提示信息：有可能多个Ensembl id会对应同一个gene symbol或者有缺失值
 rowData(sce)$ENSEMBL <- rownames(sce)
 rowData(sce)$SYMBOL <- symb
 head(rowData(sce))
+table(is.na(rowData(sce)$SYMBOL))  # 有相当一部分Ensembl id不能对应到gene symbol，显示为NA
 
+
+# It is often desirable to rename the row names of sce to the gene symbols, as these are easier to 
+# interpret. However, this requires some work to account for missing and duplicate symbols. The code 
+# below will replace missing symbols with the Ensembl identifier and concatenate duplicated symbols 
+# with the (unique) Ensembl identifiers.
 new.names <- rowData(sce)$SYMBOL
 missing.name <- is.na(new.names)
 new.names[missing.name] <- rowData(sce)$ENSEMBL[missing.name]
@@ -684,29 +705,62 @@ new.names[dup.name] <- paste0(new.names, "_", rowData(sce)$ENSEMBL)[dup.name]
 rownames(sce) <- new.names
 head(rownames(sce))
 
+# We also determine the chromosomal location for each gene using the TxDb.Mmusculus.UCSC.mm10.ensGene 
+# package. This will be useful later as several quality control metrics will be computed from rows 
+# corresponding to mitochondrial genes.
 library(TxDb.Mmusculus.UCSC.mm10.ensGene)
 location <- mapIds(TxDb.Mmusculus.UCSC.mm10.ensGene, keys=rowData(sce)$ENSEMBL, 
-                   column="CDSCHROM", keytype="GENEID")
+                   keytype="GENEID", column="CDSCHROM")
 rowData(sce)$CHR <- location
 summary(location=="chrM")
 
 
 ##################################### Quality control on the cells #####################################
+# Defining the quality control metrics
+# Cells with small library sizes are of low quality as the RNA has not been efficiently captured 
+# (i.e., converted into cDNA and amplified) during library preparation.
+
+# The number of expressed features in each cell is defined as the number of features with non-zero 
+# counts for that cell. Any cell with very few expressed genes is likely to be of poor quality as the 
+# diverse transcript population has not been successfully captured.
+
+# The proportion of reads mapped to spike-in transcripts is calculated relative to the library size 
+# for each cell. High proportions are indicative of poor-quality cells, where endogenous RNA has been 
+# lost during processing (e.g., due to cell lysis or RNA degradation). The same amount of spike-in 
+# RNA to each cell, so an enrichment in spike-in counts is symptomatic of loss of endogenous RNA. 
+# spike-in所占的比例过高提示cell quality比较差
+
+# In the absence of spike-in transcripts, the proportion of reads mapped to genes in the mitochondrial 
+# genome can also be used. High proportions are indicative of poor-quality cells 
+# (Islam et al. 2014; Ilicic et al. 2016), possibly because of loss of cytoplasmic RNA from perforated cells. 
+# The reasoning is that mitochondria are larger than individual transcript molecules and less likely to escape 
+# through tears in the cell membrane.
+# 在没有spike-in的情况下，使用线粒体基因的转录本也可以用于cell quality control；过高比例的线粒体基因转录本
+# 提示细胞破损。
+
+# For each cell, we calculate these quality control metrics using the calculateQCMetrics function 
+# from the scater package (McCarthy et al. 2017). These are stored in the row- and column-wise 
+# metadata of the SingleCellExperiment for future reference.
 library(scater)
-mito <- which(rowData(sce)$CHR=="chrM")
+mito <- which(rowData(sce)$CHR=="chrM") # 给出线粒体基因转录本的行号
 sce <- calculateQCMetrics(sce, feature_controls=list(Mt=mito))
 head(colnames(colData(sce)), 10)
 
-
+# The distributions of these metrics are shown in Figure 1, stratified by oncogene induction status 
+# and plate of origin. The aim is to remove putative low-quality cells that have low library sizes, 
+# low numbers of expressed features, and high spike-in (or mitochondrial) proportions.
 sce$PlateOnco <- paste0(sce$Oncogene, ".", sce$Plate)
-multiplot(
+multiplot(                  # multiplot是ggplot2下的函数
   plotColData(sce, y="total_counts", x="PlateOnco"),
   plotColData(sce, y="total_features", x="PlateOnco"),
   plotColData(sce, y="pct_counts_ERCC", x="PlateOnco"),
   plotColData(sce, y="pct_counts_Mt", x="PlateOnco"),
   cols=2)
 
-
+# Generally, they will be in rough agreement, i.e., cells with low total counts will also have low 
+# numbers of expressed features and high ERCC/mitochondrial proportions. Clear discrepancies may 
+# correspond to technical differences between batches of cells (see below) or genuine biological 
+# differences in RNA content.
 par(mfrow=c(1,3))
 plot(sce$total_features, sce$total_counts/1e6, xlab="Number of expressed genes",
      ylab="Library size (millions)")
