@@ -769,49 +769,112 @@ plot(sce$total_features, sce$pct_counts_ERCC, xlab="Number of expressed genes",
 plot(sce$total_features, sce$pct_counts_Mt, xlab="Number of expressed genes",
      ylab="Mitochondrial proportion (%)")
 
-
-
-libsize.drop <- isOutlier(sce$total_counts, nmads=3, type="lower", 
+# Identifying outliers for each metric
+# 有的时候阈值的设定非常的tricky，我们不妨就假设大部分的cell都是high quality的，那么在离群值范围的
+# 细胞我们就认为是低质量的细胞，需要filter掉。Outliers are defined based on the median absolute 
+# deviation (MADs) from the median value of each metric across all cells. We remove cells with 
+# log-library sizes that are more than 3 MADs below the median log-library size. A log-transformation 
+# improves resolution at small values, especially when the MAD of the raw values is comparable to or 
+# greater than the median. We also remove cells where the log-transformed number of expressed genes 
+# is 3 MADs below the median value. 我们使用的是中位绝对偏差，我们讲检测到的library size(counts)和gene
+# 数在3个MADs以下的排除掉
+libsize.drop <- isOutlier(sce$total_counts, nmads=3, type="lower",  # isOutlier()是scater包的内置函数
                           log=TRUE, batch=sce$PlateOnco)
 feature.drop <- isOutlier(sce$total_features, nmads=3, type="lower", 
                           log=TRUE, batch=sce$PlateOnco)
 
-
+# 我们也要滤除spike-in比例过高的细胞，为了更加清楚的展示(因为发现离群值中的大值)，我们不对ERCC的percentage
+# 进行log转换
 spike.drop <- isOutlier(sce$pct_counts_ERCC, nmads=3, type="higher",
                         batch=sce$PlateOnco)
 
-
+# Subsetting by column will retain only the high-quality cells that pass each filter described above. 
+# We examine the number of cells removed by each filter as well as the total number of retained cells. 
+# Removal of a substantial proportion of cells (> 10%) may be indicative of an overall issue with data 
+# quality.
 keep <- !(libsize.drop | feature.drop | spike.drop)
 data.frame(ByLibSize=sum(libsize.drop), ByFeature=sum(feature.drop),
            BySpike=sum(spike.drop), Remaining=sum(keep))
 
-
+# We then subset the SingleCellExperiment object to retain only the putative high-quality cells. 
+# We also save the original object to file for later use.
 sce$PassQC <- keep
 saveRDS(sce, file="416B_preQC.rds")
+sce # before cell QC，192个细胞
 sce <- sce[,keep]
-dim(sce)
-
+dim(sce) # after cell QC，183个细胞
 
 
 ################################### Classification of cell cycle phase ###################################
+# 英国 Sanger 研究院的 Teichmann 等人就开发了一款单细胞隐藏 可变模型 (single-cell latent variable model, 
+# scLVM) 和 Cyclone 软件。Cyclone 软 件可以利用机器学习技术和统计学的方法， 将细胞周期信息与单细胞 RNA 
+# 测序数据结合起来，来帮助我们判断哪些基因表达信号与细胞 周期的哪个阶段有关。对于任何单细胞的 RNA 测序数
+# 据，使用 Cyclone 软件就能够使其与每一个细 胞在细胞周期中所处的阶段一一对应。两者的 scLVM 就采用了在整个
+# 细胞周期中表达程度高 度可变的基因作为研究对象，来明确基因表达 与细胞周期的关系。他们确定了某一种决定细
+# 胞周期的因子，也发现了在细胞发育或分化的 整个细胞周期中，推动细胞转化的因子，而且 还发现了一些独特的亚
+# 群 (subpopulations)。设计到训练集和测试集：We use the prediction method described by Scialdone et al. 
+# (2015) to classify cells into cell cycle phases based on the gene expression data. Using a training dataset, 
+# the sign of the difference in expression between two genes was computed for each pair of genes. Pairs with 
+# changes in the sign across cell cycle phases were chosen as markers. Cells in a test dataset can then be 
+# classified into the appropriate phase, based on whether the observed sign for each marker pair is consistent 
+# with one phase or another.
+# This approach is implemented in the cyclone function from the scran package. The package contains a 
+# pre-trained set of marker pairs for mouse data, which we can load in the the readRDS function. We use the 
+# Ensembl identifiers for each gene in our dataset to match up with the names in the pre-trained set of gene pairs.
 set.seed(100)
 library(scran)
-mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", 
+mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", # 加载训练集
                                 package="scran"))
-assignments <- cyclone(sce, mm.pairs, gene.names=rowData(sce)$ENSEMBL)
-
+assignments <- cyclone(sce, mm.pairs, gene.names=rowData(sce)$ENSEMBL)  # 判断测试集细胞的细胞周期状态
+assignments # 结果是一个列表，包含分类的属性(phases)，score和normalized score
+# Each cell is assigned a score for each phase, with a higher score corresponding to a higher probability 
+# that the cell is in that phase. We focus on the G1 and G2/M scores as these are the most informative 
+# for classification. 
 par(mfrow = c(1,1))
 plot(assignments$score$G1, assignments$score$G2M, 
      xlab="G1 score", ylab="G2/M score", pch=16)
 
+# Cells are classified as being in G1 phase if the G1 score is above 0.5 and greater than the G2/M 
+# score; in G2/M phase if the G2/M score is above 0.5 and greater than the G1 score; and in S phase 
+# if neither score is above 0.5. Here, the vast majority of cells are classified as being in G1 phase. 
+# We save these assignments into the SingleCellExperiment object for later use.
 sce$phases <- assignments$phases
 table(sce$phases)
 
+# 可视化的展示
+pheatmap::pheatmap(t(assignments$scores))
+pheatmap::pheatmap(t(assignments$normalized.scores))
+
+## 有几个注意点：
+## The classifier may not be accurate for data that are substantially different from those used in 
+## the training set, e.g., due to the use of a different protocol. In such cases, users can construct 
+## a custom classifier from their own training data using the sandbag function. This will also be 
+## necessary for other model organisms where pre-trained classifiers are not available. 也就是说对于特别
+## 的建库方法，使用默认的训练集并不合适；亦或是其它模式动物，可以考虑使用sandbag函数来构建自己的训练集。
+
+## 在进行细胞周期检测之前，不要将低表达gene滤除：Do not filter out low-abundance genes before applying 
+## cyclone. Even if a gene is not expressed in any cell, it may still be useful for classification if 
+## it is phase-specific. Its lack of expression relative to other genes will still yield informative pairs, 
+## and filtering them out would reduce power.
 
 ################################### Examining gene-level expression metrics ###################################
+# We examine the identities of the most highly expressed genes (Figure 4). This should generally be dominated by 
+# constitutively expressed transcripts, such as those for ribosomal or mitochondrial proteins. The presence of 
+# other classes of features may be cause for concern if they are not consistent with expected biology. For example, 
+# a top set containing many spike-in transcripts suggests that too much spike-in RNA was added during library preparation, 
+# while the absence of ribosomal proteins and/or the presence of their pseudogenes are indicative of suboptimal alignment.
+# 通常来讲，高表达的基因是和细胞生物学功能相关，或者是线粒体内或者核糖体基因。过好的spike-in不是好事情。
 fontsize <- theme(axis.text=element_text(size=12), axis.title=element_text(size=16))
-plotQC(sce, type = "highest-expression", n=50) + fontsize
+plotQC(sce, type = "highest-expression", n=50) + fontsize  # 这一步可能会卡，最好先清一清内存空间
 
+# Filtering out low-abundance genes：
+# Several metrics can be used to define low-abundance genes. The most obvious is the average count for 
+# each gene, computed across all cells in the dataset. We calculate this using the calcAverage() function, 
+# which also performs some adjustment for library size differences between cells. We typically observe a 
+# peak of moderately expressed genes following a plateau of lowly expressed genes (Figure 5).
+# A minimum threshold can be applied to this value to filter out genes that are lowly expressed. The example 
+# below demonstrates how we could remove genes with average counts less than 1. The number of TRUE values in 
+# demo.keep corresponds to the number of retained rows/genes after filtering.
 ave.counts <- calcAverage(sce, use_size_factors=FALSE)
 hist(log10(ave.counts), breaks=100, main="", col="grey80", 
      xlab=expression(Log[10]~"average count"))
@@ -820,18 +883,28 @@ demo.keep <- ave.counts >= 1
 filtered.sce <- sce[demo.keep,]
 summary(demo.keep)
 
-
+# We also examine the number of cells that express each gene. This is closely related to the average 
+# count for most genes, as expression in many cells will result in a higher average (Figure 6). Genes 
+# expressed in very few cells are often uninteresting as they are driven by amplification artifacts 
+# (though they may also also arise from rare populations). We could then remove genes that are 
+# expressed in fewer than n cells. “Intensity of colour corresponds to the number of genes at any given location.”
 num.cells <- nexprs(sce, byrow=TRUE)
 smoothScatter(log10(ave.counts), num.cells, ylab="Number of cells", 
               xlab=expression(Log[10]~"average count"))
 
-
+# We remove genes that are not expressed in any cell to reduce computational work in downstream steps. 
+# Such genes provide no information and would be removed by any filtering strategy.
 to.keep <- num.cells > 0
 sce <- sce[to.keep,]
 summary(to.keep)
 
 
 ############################## Normalization of cell-specific biases ##############################
+# Using the deconvolution method to deal with zero counts
+# Single-cell data can be problematic for these bulk data-based methods (DESeq2 and edgeR normalization) due 
+# to the dominance of low and zero counts. To overcome this, we pool counts from many cells to increase the 
+# count size for accurate size factor estimation (Lun, Bach, and Marioni 2016). Pool-based size factors are 
+# then “deconvolved” into cell-based factors for cell-specific normalization.
 sce <- computeSumFactors(sce)
 summary(sizeFactors(sce))
 
