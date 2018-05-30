@@ -965,32 +965,48 @@ assayNames(sce)
 # of the earlier PCs. In contrast, random technical noise affects each gene independently and will be 
 # represented by later PCs. The denoisePCA() function removes later PCs until the total discarded 
 # variance is equal to the sum of technical components for all genes used in the PCA.
+
 # 在减少了背景噪声（某些基因）的基础上，对数据进行进一步降维（一般降维到原来维度的4-7%），以进一步去除背景噪音
 # denoisePCA() will only use genes that have positive biological components, i.e., variances greater 
 # than the fitted trend. This guarantees that the total technical variance to be discarded will not 
 # be greater than the total variance in the data. 所以上面modeling technical noise一部是必须先执行的。
+
+# No filtering is performed on abundance here, which ensures that PCs corresponding to rare subpopulations 
+# can still be detected. Discreteness is less of an issue as low-abundance genes also have lower variance, 
+# thus reducing their contribution to the PCA.
 sce <- denoisePCA(sce, technical=var.fit$trend, assay.type="corrected")
 dim(reducedDim(sce, "PCA")) 
 
-# The function returns a SingleCellExperiment object containing the PC scores for each cell in the 
-# reducedDims slot. The aim is to eliminate technical noise and enrich for biological signal in the 
-# retained PCs. This improves resolution of the underlying biology during downstream procedures such 
-# as clustering.
+# It is also possible to obtain a low-rank approximation of the original expression matrix, capturing 
+# the variance equivalent to the retained PCs. This is useful for denoising prior to downstream 
+# procedures that require gene-wise expression values.
 sce2 <- denoisePCA(sce, technical=var.fit$trend, 
                    assay.type="corrected", value="lowrank") 
 assayNames(sce2)
 
-
-
 ######################## Data exploration with dimensionality reduction #######################
+# We visualize the relationships between cells by constructing pairwise PCA plots for the first three 
+# components (Figure 10). Cells with similar expression profiles should be located close together in 
+# the plot, while dissimilar cells should be far apart. In this case, we observe a clear separation 
+# of cells based on the oncogene induction status, consistent with the expected effects on the transcriptome.
+# 不同的颜色可以区分(induced or control)
 plotReducedDim(sce, use_dimred="PCA", ncomponents=3, 
                colour_by="Oncogene") + fontsize
 
+# By comparison, we observe no clear separation of cells by batch (Figure 11). This indicates that 
+# our batch correction step using removeBatchEffect() was successful. 不同颜色(batch)应该搅合在一起
 plotReducedDim(sce, use_dimred="PCA", ncomponents=3, 
                colour_by="Plate") + fontsize
 
 
-
+# Another widely used approach for dimensionality reduction is the t-stochastic neighbour embedding 
+# (t-SNE) method (Van der Maaten and Hinton 2008). t-SNE tends to work better than PCA for separating 
+# cells in more diverse populations. This is because the former can directly capture non-linear 
+# relationships in high-dimensional space, whereas the latter must represent them on linear axes. 
+# However, this improvement comes at the cost of more computational effort and requires the user to
+# consider parameters such as the random seed and perplexity (see comments). We demonstrate the 
+# generation of t-SNE plots in Figure 12, using the low-rank approximation of the data to take 
+# advantage of the denoising step.
 run_args <- list(rand_seed=100, use_dimred="PCA")
 out5 <- plotTSNE(sce, run_args=c(run_args, perplexity=5),
                  colour_by="Oncogene") + fontsize + ggtitle("Perplexity = 5")
@@ -1003,8 +1019,21 @@ out20 <- plotTSNE(sce, run_args=c(run_args, perplexity=20),
 
 multiplot(out5, out10, out20, cols=3)
 
+## There are many other dimensionality reduction techniques that we do not consider here but could 
+## also be used, e.g., multidimensional scaling, diffusion maps. These have their own advantages and 
+## disadvantages – for example, diffusion maps (see plotDiffusionMap) place cells along a continuous 
+## trajectory and are suited for visualizing graduated processes like differentiation
 
+## t-SNE is a stochastic method, so users should run the algorithm several times to ensure that the 
+## results are representative. Scripts should set a seed (via the  rand_seed argument) to ensure 
+## that the chosen results are reproducible. It is also advisable to test different settings of the 
+## “perplexity” parameter as this will affect the distribution of points in the low-dimensional 
+## space. A good guide on how to interpret t-SNE plots can be found at http://distill.pub/2016/misread-tsne/.
 ######################## Clustering cells into putative subpopulations ########################
+# 大致策略是先用PCA降维去噪，计算距离矩阵，根据距离矩阵来进行clustering。其中使用Ward’s criterion可减少
+# 同一个cluster的variance。然后使用动态剪切树的方法来进一步减少cluster的数量。然后在经过PCA降维的数据基础上
+# 进行tSNE可视化以进一步区分不同的细胞，cluster是用距离矩阵和剪切数来定义的。
+# 这种在去除背景噪音基因的基础上，再进行两次数据降维的方法（PCA降维后再用tSNE）非常适合可视化。
 pcs <- reducedDim(sce, "PCA")
 my.dist <- dist(pcs)
 my.tree <- hclust(my.dist, method="ward.D2")
@@ -1029,25 +1058,57 @@ sil.cols <- sil.cols[order(-sil[,1], sil[,3])]
 plot(sil, main = paste(length(unique(my.clusters)), "clusters"), 
      border=sil.cols, col=sil.cols, do.col.sort=FALSE) 
 
-
+# Detecting marker genes
+# 1, Once putative subpopulations are identified by clustering, we can identify marker genes for each 
+# cluster using the findMarkers function. This fits a linear model to the log-expression values for 
+# each gene using limma (Ritchie et al. 2015). The aim is to test for DE in each cluster compared to 
+# the others while blocking on uninteresting factors such as the plate of origin in design. The top 
+# DE genes are likely to be good candidate markers as they can effectively distinguish between cells 
+# in different clusters.
+# 2, findMarkers can also be directed to find genes that are DE between the chosen cluster and all 
+# other clusters. This should be done by setting pval.type="all", which defines the p-value for each 
+# gene as the maximum value across all pairwise comparisons involving the chosen cluster. Combined 
+# with direction="up", this can be used to identify unique markers for each cluster. However, this 
+# is sensitive to overclustering, as unique marker genes will no longer exist if a cluster is split 
+# into two smaller subclusters.
 markers <- findMarkers(sce, my.clusters, block=sce$Plate)
+markers
 
-
+markers_strict <- findMarkers(sce, my.clusters, block=sce$Plate, pval.type= "all", direction = 'up')
+markers_strict # 看一下fdr
+# To construct a marker set for cluster 1 from the top 10 genes of each comparison, one would filter 
+# marker.set to retain rows with Top less than or equal to 10. Other statistics are also reported for 
+# each gene, including the adjusted p-values (see below) and the log-fold changes relative to every 
+# other cluster.
 marker.set <- markers[["1"]]
 head(marker.set, 10)
 
-
+# We save the list of candidate marker genes for further examination.
 write.table(marker.set, file="416B_marker_1.tsv", sep="\t", 
             quote=FALSE, row.names=FALSE)
 
-
-
+# We visualize the expression profiles of the top candidates to verify that the DE signature is robust 
+# (Figure 15). Most of the top markers have strong and consistent up- or downregulation in cells of 
+# cluster 1 compared to some or all of the other clusters. A cursory examination of the heatmap 
+# indicates that cluster 1 contains oncogene-induced cells with strong downregulation of DNA replication 
+# and cell cycle genes. This is consistent with the potential induction of senescence as an 
+# anti-tumorigenic response (Wajapeyee et al. 2010). A more comprehensive investigation of the 
+# function of these markers can be performed with gene set enrichment analyses, e.g., using kegga 
+# or goana from limma.
 top.markers <- rownames(marker.set)[marker.set$Top <= 10]
 plotHeatmap(sce, features=top.markers, columns=order(sce$cluster), 
             colour_columns_by=c("cluster", "Plate", "Oncogene"),
             cluster_cols=FALSE, center=TRUE, symmetric=TRUE, zlim=c(-5, 5))
             
-
+## 找到单一一个细胞类型特异表达的gene有的时候标准过于苛刻，在部分subpopulation存在DE就可以认为marker
+## Many of the markers in Figure 15 are not uniquely up- or downregulated in the chosen cluster. 
+# Testing for unique DE tends to be too stringent as it overlooks important genes that are expressed 
+# in two or more clusters. For example, in a mixed population of CD4+-only, CD8+-only, double-positive 
+# and double-negative T cells, neither Cd4 or Cd8 would be detected as subpopulation-specific markers 
+# because each gene is expressed in two subpopulations. With our approach, both of these genes will 
+# be picked up as candidate markers as they will be DE between at least one pair of subpopulations. 
+# A combination of markers can then be chosen to characterize a subpopulation, which is more flexible 
+# than trying to find uniquely DE genes.
 
 #################################### Concluding remarks ####################################
 saveRDS(file="416B_data.rds", sce)
