@@ -920,18 +920,33 @@ sce <- normalize(sce)
 
 
 ########################### Modelling the technical noise in gene expression ###########################
+# Fitting a trend to the spike-in variances
+# Variability in the observed expression values across genes can be driven by genuine biological heterogeneity 
+# or uninteresting technical noise. To distinguish between these two possibiltiies, we need to model the 
+# technical component of the variance of the expression values for each gene. We do so using the set of 
+# spike-in transcripts, which were added in the same quantity to each cell. Thus, the spike-in transcripts 
+# should exhibit no biological variability, i.e., any variance in their counts should be technical in 
+# origin.
+
+# We use the trendVar() function to fit a mean-dependent trend to the variances of the log-expression values for the spike-in transcripts. We set block= to block on the plate of origin for each cell, to ensure that technical differences between plates do not inflate the variances. Given the mean abundance of a gene, the fitted value of the trend is then used as an estimate of the technical component for that gene. The biological component of the variance is finally calculated by subtracting the technical component from the total variance of each gene with the decomposeVar function.
 var.fit <- trendVar(sce, parametric=TRUE, block=sce$Plate,
                     loess.args=list(span=0.3))
 var.out <- decomposeVar(sce, var.fit)
 head(var.out)
 
-
+# We visually inspect the trend to confirm that it corresponds to the spike-in variances (Figure 8)). 
+# The wave-like shape is typical of the mean-variance trend for log-expression values. A linear 
+# increase in the variance is observed as the mean increases from zero, as larger variances are 
+# possible when the counts increase. At very high abundances, the effect of sampling noise decreases 
+# due to the law of large numbers, resulting in a decrease in the variance.
 plot(var.out$mean, var.out$total, pch=16, cex=0.6, xlab="Mean log-expression", 
      ylab="Variance of log-expression")
 curve(var.fit$trend(x), col="dodgerblue", lwd=2, add=TRUE)
 cur.spike <- isSpike(sce)
 points(var.out$mean[cur.spike], var.out$total[cur.spike], col="red", pch=16)
 
+# We check the distribution of expression values for the genes with the largest biological components. 
+# This ensures that the variance estimate is not driven by one or two outlier cells (Figure 9).
 chosen.genes <- order(var.out$bio, decreasing=TRUE)[1:10]
 plotExpression(sce, features=rownames(var.out)[chosen.genes]) + fontsize
 
@@ -944,10 +959,23 @@ assayNames(sce)
 
 
 ############################## Denoising expression values using PCA ##############################
+# Once the technical noise is modelled, we can use principal components analysis (PCA) to remove random technical noise.
+# We assume that biological processes involving co-regulated groups of genes will account for the 
+# most variance in the data. If this is the case, this process should be represented by one or more 
+# of the earlier PCs. In contrast, random technical noise affects each gene independently and will be 
+# represented by later PCs. The denoisePCA() function removes later PCs until the total discarded 
+# variance is equal to the sum of technical components for all genes used in the PCA.
+# 在减少了背景噪声（某些基因）的基础上，对数据进行进一步降维（一般降维到原来维度的4-7%），以进一步去除背景噪音
+# denoisePCA() will only use genes that have positive biological components, i.e., variances greater 
+# than the fitted trend. This guarantees that the total technical variance to be discarded will not 
+# be greater than the total variance in the data. 所以上面modeling technical noise一部是必须先执行的。
 sce <- denoisePCA(sce, technical=var.fit$trend, assay.type="corrected")
 dim(reducedDim(sce, "PCA")) 
 
-
+# The function returns a SingleCellExperiment object containing the PC scores for each cell in the 
+# reducedDims slot. The aim is to eliminate technical noise and enrich for biological signal in the 
+# retained PCs. This improves resolution of the underlying biology during downstream procedures such 
+# as clustering.
 sce2 <- denoisePCA(sce, technical=var.fit$trend, 
                    assay.type="corrected", value="lowrank") 
 assayNames(sce2)
