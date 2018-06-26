@@ -1,3 +1,5 @@
+# SimpleSingleCell是基于EMBL-EBI的scater包和SingleCellExperiment对象进行单细胞数据分析的
+
 #==============================================================================================
 #
 #             0.Analyzing single-cell RNA sequencing data from droplet-based protocols
@@ -8,44 +10,52 @@
 # 下载数据
 
 ####################################### Setting up the data #######################################
-# Reading in a sparse matrix
+
+#----------------------# Reading in a sparse matrix 读取数据（稀疏矩阵） #----------------------#
 ## We load in the raw count matrix using the read10xCounts() function from the DropletUtils package. 
 ## This will create a SingleCellExperiment object where each column corresponds to a cell barcode.
-untar("pbmc4k_raw_gene_bc_matrices.tar.gz", exdir="pbmc4k")
-
+untar("pbmc4k_raw_gene_bc_matrices.tar.gz", exdir="pbmc4k")   # 这一步可以省略了
+setwd('/Users/mijiarui/Nature_Biotechnology_Paper/simpleSingleCell')
+getwd()
+dir('/Users/mijiarui/Nature_Biotechnology_Paper/simpleSingleCell/pbmc4k/raw_gene_bc_matrices/GRCh38')  # 我们看到标准的droplet-based 方法得到的下机文件
 ## 我们看到10X的数据解压以后是一个文件夹，进入文件夹有三个文件分别是“barcodes.tsv", "genes.tsc", "matrix.mtx"
 ## 一般10X的数据可以使用Seurat(适合大量细胞)，当然在细胞数有限的情况下考虑使用SingleCellExperiment对象
 ## 和Scater包也是可以一样处理的，在这里我们使用scater
 library(DropletUtils)
 fname <- "pbmc4k/raw_gene_bc_matrices/GRCh38"
-sce <- read10xCounts(fname, col.names=TRUE)
+sce <- read10xCounts(fname, col.names=TRUE) # 注意我们读入数据就直接构建了一个SingleCellExperiment对象
 sce # assays里面只有counts一个slots
 
 ## Here, each count represents the number of unique molecular identifiers (UMIs) assigned to a gene 
 ## for a cell barcode. Note that the counts are loaded as a sparse matrix object - specifically, a 
 ## dgCMatrix instance from the Matrix package. This avoids allocating memory to hold zero counts, 
 ## which is highly memory-efficient for low-coverage scRNA-seq data.
-## 一般10X的方法是和UMI序列一起配合使用的。一般来讲droplet-based methods是没有spike-in RNA的
-class(counts(sce))
+## 一般10X的方法是和UMI序列一起配合使用的。一般来讲droplet-based methods是没有spike-in RNA的，这个数据也是典型的UMI数据
+class(counts(sce))  # Matrix包中的dgCMatrix类型，属于一个稀疏矩阵。
 
-# Annotating the rows
+#----------------------# Annotating the rows 数据预处理，对基因进行注释 #----------------------#
 ## We relabel the rows with the gene symbols for easier reading. This is done using the  
 ## uniquifyFeatureNames() function, which ensures uniqueness in the case of duplicated or missing 
-## symbols.
+## symbols. 这个uniquifyFeatureNames函数是来自scater包的。
 library(scater)
+head(rowData(sce)); length(rowData(sce)$ID)
 rownames(sce) <- uniquifyFeatureNames(rowData(sce)$ID, rowData(sce)$Symbol)
 head(rownames(sce))
 
 ## We also identify the chromosomal location for each gene. The mitochondrial location is particularly 
 ## useful for later quality control.
 library(EnsDb.Hsapiens.v86)
+str(EnsDb.Hsapiens.v86)
+??ensembldb  # 对于这种注释包，建议查看这个帮助文档
+ls('package:EnsDb.Hsapiens.v86')
 location <- mapIds(EnsDb.Hsapiens.v86, keys=rowData(sce)$ID, 
                    column="SEQNAME", keytype="GENEID")
+table(location) # 查看一下染色体的名字，尤其是注意一下线粒体基因是如何注释的，在这里是MT
 rowData(sce)$CHR <- location
 summary(location=="MT")
 
 
-#################################### Calling cells from empty droplets ####################################
+#################################### Calling cells from empty droplets 去除空微滴 ####################################
 # An interesting aspect of droplet-based data is that we have no prior knowledge about which droplets 
 # (i.e., cell barcodes) actually contain cells, and which are empty. Thus, we need to call cells from 
 # empty droplets based on the observed expression profiles. This is not entirely straightforward as 
@@ -53,12 +63,16 @@ summary(location=="MT")
 # examination of the distribution of total counts suggests a fairly sharp transition between barcodes 
 # with large and small total counts (Figure 1), probably corresponding to cell-containing and empty 
 # droplets respectively.
-bcrank <- barcodeRanks(counts(sce))
+# Droplet-based方法相比Fludigm的方法有一个缺陷，就是你无法通过肉眼来观察那些droplet是有细胞（正常细胞的），
+# 所以我们常规通过计算每个droplet检测到的counts数量来评估这个droplet能不能用
+bcrank <- barcodeRanks(counts(sce)) # 这个函数计算barcode rank统计量，找到统计值的knee和inflection point（拐点）
+str(bcrank)
 
 # Only showing unique points for plotting speed.
 uniq <- !duplicated(bcrank$rank)
+length(bcrank$rank[uniq])  
 par(mfrow = c(1,1))
-plot(bcrank$rank[uniq], bcrank$total[uniq], log="xy",
+plot(bcrank$rank[uniq], bcrank$total[uniq], log="xy",   # 注意横纵坐标的数值
      xlab="Rank", ylab="Total UMI count", cex.lab=1.2,
      main = 'Total UMI count for each barcode in the PBMC dataset, plotted against its rank (in decreasing order of total counts)')
 
@@ -73,8 +87,13 @@ legend("bottomleft", legend=c("Inflection", "Knee"),
 # significantly different from the ambient pool (Lun et al. 2018). Any significant deviation indicates 
 # that the barcode corresponds to a cell-containing droplet. We call cells at a false discovery rate 
 # (FDR) of 1%, meaning that no more than 1% of our called barcodes should be empty droplets on average.
+# 使用emptyDrops()函数来识别异常细胞
 set.seed(100)
 e.out <- emptyDrops(counts(sce))
+dim(e.out)
+head(e.out)
+str(e.out)
+table(e.out@listData$FDR)
 sum(e.out$FDR <= 0.01, na.rm=TRUE)
 
 # emptyDrops() computes Monte Carlo p-values, so it is important to set the random seed to obtain 
@@ -88,28 +107,33 @@ sce <- sce[,which(e.out$FDR <= 0.01)]
 ## emptyDrops() assumes that cell barcodes with total UMI counts below a certain threshold (default 
 ## of 100) correspond to empty droplets, and uses them to estimate the ambient expression profile. By 
 ## definition, these barcodes cannot be cell-containing droplets and are excluded from the hypothesis 
-## testing, hence the NAs in the output. 
+## testing, hence the NAs in the output.  
+## 即emptyDrop默认单个细胞UMI数小于特定阈值（默认是100）为empty cell
 
 
-#################################### Quality control on the cells ####################################
+#################################### Quality control on the cells 基于细胞的QC步骤 ####################################
 # The previous step only distinguishes cells from empty droplets, but makes no statement about the 
 # quality of the cells. It is entirely possible for droplets to contain damaged or dying cells, which 
 # need to be removed prior to downstream analysis. We compute some QC metrics using 
 # calculateQCMetrics() (McCarthy et al. 2017) and examine their distributions in Figure 2.
+# 也就是说上面一步只是排除了empty droplet，但是对于damaged或者dying cell，并没有处理干净
+str(sce)
 sce <- calculateQCMetrics(sce, feature_controls=list(Mito=which(location=="MT")))
-par(mfrow=c(1,3))
-hist(sce$log10_total_counts, breaks=20, col="grey80",
+str(sce)  # 我们看到经过calculateQCMetrics后，增加了大量colData和elementMetadata(listData)的内容
+par(mfrow=c(1,3))  # 这波操作和Seurat一模一样
+hist(sce$log10_total_counts, breaks=20, col="grey80",    # UMI的分布
      xlab="Log-total UMI count")
-hist(sce$log10_total_features_by_counts, breaks=20, col="grey80",
+hist(sce$log10_total_features_by_counts, breaks=20, col="grey80",   # 检测到的gene分布
      xlab="Log-total number of expressed features")
-hist(sce$pct_counts_Mito, breaks=20, col="grey80",
+hist(sce$pct_counts_Mito, breaks=20, col="grey80",   # 线粒体基因百分比的分布
      xlab="Proportion of reads in mitochondrial genes")
 
 # Ideally, we would remove cells with low library sizes or total number of expressed features as 
 # described previously. However, this would likely remove cell types with low RNA content, 
 # especially in a heterogeneous PBMC population with many different cell types. Thus, we use a more 
-# relaxed strategy and only remove cells with large mitochondrial proportions, using it as a proxy 
+# relaxed strategy and only remove cells with large mitochondrial proportions, using it as a proxy (代理)
 # for cell damage. (Keep in mind that droplet-based datasets usually do not have spike-in RNA.)
+# 为了减少排除那些本身RNA表达量就很低的细胞，我们仅仅根据线粒体基因表达百分比来进行过滤。
 high.mito <- isOutlier(sce$pct_counts_Mito, nmads=3, type="higher")
 sce <- sce[,!high.mito]
 summary(high.mito)
@@ -122,25 +146,30 @@ summary(high.mito)
 ## containing genes that appear to be strongly “upregulated” due to the presence of very small size 
 ## factors; containing genes that are strongly downregulated due to the loss of RNA upon cell damage; 
 ## and distorting the characterization of population heterogeneity during variance estimation or PCA.
+## Aaron建议我们在进行数据过滤的时候采取先紧后松的策略，也就是说我们首先进行严格的QC，这样防止后面差异基因，
+## PCA，细胞异质性分析产生误差。这边Aaron采取比较宽松的过滤是回顾性的重新调整。
 
-
-##################################### Examining gene expression #####################################
+##################################### Examining gene expression 查看基因表达量 #####################################
 # The average expression of each gene is much lower here compared to the previous datasets (Figure 3). 
 # This is due to the reduced coverage per cell when thousands of cells are multiplexed together for 
-# sequencing.
+# sequencing. 我们看到基因的表达量非常低
 ave <- calcAverage(sce)
 rowData(sce)$AveCount <- ave
 par(mfrow = c(1,1))
 hist(log10(ave), col="grey80")
 
 # The set of most highly expressed genes is dominated by ribosomal protein and mitochondrial genes (Figure 4), as expected.
-plotHighestExprs(sce)
+plotHighestExprs(sce)  # 比较耗时。
+## For each feature, each bar represents the percentage assigned to that feature for a single cell, while the circle represents 
+## the average across all cells. Bars are coloured by the total number of expressed features in each cell.
 
-
-################################## Normalizing for cell-specific biases ################################
+################################## Normalizing for cell-specific biases 去除混杂因素(测序文库大小) ################################
 # We apply the deconvolution method to compute size factors for all cells (Lun, Bach, and Marioni 2016). 
 # We perform some pre-clustering to break up obvious clusters and avoid pooling cells that are very 
-# different.
+# different. 计算每个细胞的size factor，但是事先对细胞进行cluster，以排除因为明显的cluster造成了误差
+# 使用了scran包中的quickCluster函数，Cluster similar cells based on rank correlations in their gene expression profiles；
+# 其中cluster的method有两个，一个是hclust，另一个是igraph(shared nearest neighbor graph)；对细胞进行
+# 一个最粗略的cluster。
 library(scran)
 clusters <- quickCluster(sce, method="igraph", min.mean=0.1,
                          irlba.args=list(maxit=1000)) # for convergence.
@@ -150,21 +179,26 @@ sce <- computeSumFactors(sce, min.mean=0.1, cluster=clusters)
 summary(sizeFactors(sce))
 
 # The size factors are well correlated against the library sizes (Figure 5), indicating that capture 
-# efficiency and sequencing depth are the major biases.
+# efficiency and sequencing depth are the major biases. 
 plot(sce$total_counts, sizeFactors(sce), log="xy")
+cor(sce$total_counts, sizeFactors(sce))
 
 # Finally, we compute normalized log-expresion values. There is no need to call  computeSpikeFactors() 
 # here, as there are no spike-in transcripts available.
-sce <- normalize(sce)
+sce <- normalize(sce) # log转换
+sce # 增加了logcounts这个slot，默认是return_log=TRUE，所以返回的是logcounts；如果return_log=FALSE，增加的slot是normcounts
+## 其实现步骤是根据size factor对测序文库的大小进行normalization，然后根据return_log参数决定是否需要log转换。
+?normalize # 建议查看这个函数的帮助文档。
 
-
-#################################### Modelling the mean-variance trend ####################################
+#################################### Modelling the mean-variance trend (根据表达均值和标准差来筛选基因) ####################################
 # The lack of spike-in transcripts complicates the modelling of the technical noise. One option is to 
 #assume that most genes do not exhibit strong biological variation, and to fit a trend to the 
 # variances of endogenous genes. However, this assumption is generally unreasonable for a heterogeneous 
 # population. Instead, we assume that the technical noise is Poisson and create a fitted trend on that 
-# basis using the makeTechTrend() function.
-new.trend <- makeTechTrend(x=sce)
+# basis using the makeTechTrend() function. 
+# 注意不同表达量的gene的techinical noise在这边定义为服从poisson分布
+new.trend <- makeTechTrend(x=sce) # 计算technical noise，服从poisson分布，在下图以红色的点表示
+str(new.trend)
 
 # We estimate the variances for all genes and compare the trend fits in Figure 6. The Poisson-based 
 # trend serves as a lower bound for the variances of the endogenous genes, consistent with non-zero 
@@ -172,34 +206,42 @@ new.trend <- makeTechTrend(x=sce)
 # The blue line represents the mean-dependent trend fitted to the variances, while the red line 
 # represents the Poisson noise.
 fit <- trendVar(sce, use.spikes=FALSE, loess.args=list(span=0.05))
-plot(fit$mean, fit$var, pch=16)
+str(fit)
+plot(fit$mean, fit$var, pch=16)   # 注意这里面每一个点都是一个gene
 curve(fit$trend(x), col="dodgerblue", add=TRUE)
 curve(new.trend(x), col="red", add=TRUE)
+## The blue line represents the mean-dependent trend fitted to the variances, while the red line represents the Poisson noise.
+## 红线是服从poisson分布的technical noise，蓝线是根据expression和variance的fit line。
 
 # We decompose the variance for each gene using the Poisson-based trend, and examine the genes with 
-# the highest biological components.
+# the highest biological components. 我们对每个gene的variance进行分解(分解为biological和technical variance)，基于poisson分布
 fit0 <- fit
 fit$trend <- new.trend
-dec <- decomposeVar(fit=fit)
-top.dec <- dec[order(dec$bio, decreasing=TRUE),] 
+dec <- decomposeVar(fit=fit)   # Decompose the gene-specific variance into biological and technical components for single-cell RNA-seq data.
+top.dec <- dec[order(dec$bio, decreasing=TRUE),]  
+## bio的属性：Biological component of the variance；tech的属性：Technical component of the variance.
 head(top.dec)
+
 
 # We can plot the genes with the largest biological components, to verify that they are indeed highly 
 # variable (Figure 7). Distributions of normalized log-expression values for the top 10 genes with the 
 # largest biological components in the PBMC dataset. Each point represents the log-expression value in 
 # a single cell.
-plotExpression(sce, features=rownames(top.dec)[1:10])
+plotExpression(sce, features=rownames(top.dec)[1:10])  # Each point represents the log-expression value in a single cell.
 
 
-#################################### Dimensionality reduction ####################################
+#################################### Dimensionality reduction 数据降维 ####################################
 # We use the denoisePCA() function with the assumed Poisson technical trend, to choose the number of 
 # dimensions to retain after PCA. The red line represents the chosen number of PCs.
+# 首先采用PCA的线性降维，找到有意义的PC
 sce <- denoisePCA(sce, technical=new.trend, approx=TRUE)
 ncol(reducedDim(sce, "PCA"))
 
-plot(attr(reducedDim(sce), "percentVar"), xlab="PC",
+str(reducedDim(sce)) # 结果是两个大的slot，第一个slot是每个PC中每个gene的weight；第二个slot是每个PC对variance的贡献
+attr(reducedDim(sce), "percentVar")  # 使用attr函数调取每个PC对variance的贡献
+plot(attr(reducedDim(sce), "percentVar"), xlab="PC",   # 绘制碎石图
      ylab="Proportion of variance explained")
-abline(v=ncol(reducedDim(sce, "PCA")), lty=2, col="red")
+abline(v=ncol(reducedDim(sce, "PCA")), lty=2, col="red")  # The red line represents the chosen number of PCs.
 
 # Examination of the first few PCs already reveals some strong substructure in the data (Figure 9).
 # Pairwise PCA plots of the first three PCs in the PBMC dataset, constructed from normalized 
@@ -209,13 +251,14 @@ plotPCA(sce, ncomponents=3, colour_by="log10_total_features_by_counts")
 
 # This is recapitulated with a t-SNE plot (Figure 10). Again, note that we set use_dimred= to perform 
 # t-SNE on the denoised expression matrix. Each point represents a cell and is coloured according to 
-# the log-number of expressed features.
+# the log-number of expressed features. t-SNE是基于PCA筛选出来的有效PC的结果之上的，颜色根据log转换后的表达的feature。
 sce <- runTSNE(sce, use_dimred="PCA", perplexity=30, rand_seed=100)
 plotTSNE(sce, colour_by="log10_total_features_by_counts")
 
-#################################### Clustering with graph-based methods ####################################
+#################################### Clustering with graph-based methods 基于graph-based的聚类方法 ####################################
 # We build a shared nearest neighbour graph (Xu and Su 2015) and use the Walktrap algorithm to 
-# identify clusters.\
+# identify clusters.
+# 我们进行可视化往往采用PCA+tSNE，但是clustering往往是PCA+其它方法，例如SNN
 snn.gr <- buildSNNGraph(sce, use.dimred="PCA")
 clusters <- igraph::cluster_walktrap(snn.gr)
 sce$Cluster <- factor(clusters$membership)
@@ -231,18 +274,23 @@ log.ratio <- log2(cluster.mod$observed/cluster.mod$expected + 1)
 library(pheatmap)
 pheatmap(log.ratio, cluster_rows=FALSE, cluster_cols=FALSE, 
          color=colorRampPalette(c("white", "blue"))(100))
+## Heatmap of the log10-ratio of the total weight between nodes in the same cluster or in different clusters, relative to 
+## the total weight expected under a null model of random links
 
 # We examine the cluster identities on a t-SNE plot (Figure 12) to confirm that different clusters 
 # are indeed separated.
 plotTSNE(sce, colour_by="Cluster")
+## Each point represents a cell and is coloured according to its cluster identity.
+## 赋予颜色，同时也能看出来，通过t-SNE的得到的二维展现的每个独立的群，是否和使用SNN算法计算得到的cluster相吻合。
 
 
 
-######################################## Marker gene detection ######################################
+######################################## Marker gene detection 寻找marker gene ######################################
 # We detect marker genes for each cluster using findMarkers(). Again, we only look at upregulated 
 # genes in each cluster, as these are more useful for positive identification of cell types in a 
-# heterogeneous population.
+# heterogeneous population. 只focus在高表达的gene
 markers <- findMarkers(sce, clusters=sce$Cluster, direction="up")
+str(markers) # 这里一共13个cluster，计算每个cluster的marker gene，并给出与任意一个其它cluster的logFC的数值。
 # We examine the markers for cluster 1 in more detail. The upregulation of genes such as PF4 and 
 # PPBP suggests that cluster 1 contains platelets or their precursors.
 marker.set <- markers[["1"]]
@@ -250,10 +298,12 @@ head(marker.set[,1:8], 10) # only first 8 columns, for brevity
 
 # This is confirmed in Figure 13, where the transcriptional profile of cluster 1 is clearly distinct 
 # from the others.
-chosen <- rownames(marker.set)[marker.set$Top <= 10]
+chosen <- rownames(marker.set)[marker.set$Top <= 10] # 我们选择了在cluster1中高表达的前10个gene
 plotHeatmap(sce, features=chosen, exprs_values="logcounts", 
             zlim=5, center=TRUE, symmetric=TRUE, cluster_cols=FALSE,
             colour_columns_by="Cluster", columns=order(sce$Cluster))
+## Heatmap of mean-centred and normalized log-expression values for the top set of markers for cluster 1 in the PBMC dataset
+## Column colours represent the cluster to which each cell is assigned, as indicated by the legend.
 
 ######################################## Concluding remarks ########################################
 saveRDS(sce, file="pbmc_data.rds")
@@ -268,7 +318,7 @@ saveRDS(sce, file="pbmc_data.rds")
 setwd('/Users/mijiarui/Nature_Biotechnology_Paper/simpleSingleCell')
 library(simpleSingleCell)
 
-######################################### Overview ##########################################
+######################################### Overview 项目简介##########################################
 
 ## In this workflow, we examine a heterogeneous dataset from a study of cell types in the mouse 
 ## brain (Zeisel et al. 2015). This contains approximately 3000 cells of varying types such as 
@@ -276,9 +326,12 @@ library(simpleSingleCell)
 ## microfluidics system (Pollen et al. 2014) and library preparation was performed on each cell 
 ## using a UMI-based protocol. After sequencing, expression was quantified by counting the number 
 ## of UMIs mapped to each gene.
+## # 使用的Fluidigm C1进行细胞分选，UMI对转录本进行计数，加入spike-in
 
-#################################### Setting up the data ####################################
-
+#################################### Setting up the data 构建数据对象 ####################################
+# 在这里作者定义了一个数据合并函数，将存储在不同文件中的内源基因，spike-in和线粒体基因的文件加以合并
+# 注意这个函数的定义只使用于当前数据集，如果需要改动，建议首先查看自己的数据集。因为数据文件比较大，
+# 建议在终端使用less命令打开。
 readFormat <- function(infile) { 
   # First column is empty.
   metadata <- read.delim(infile, stringsAsFactors=FALSE, header=FALSE, nrow=10)[,-1] 
@@ -292,36 +345,49 @@ readFormat <- function(infile) {
   counts <- as.matrix(counts)
   return(list(metadata=metadata, counts=counts))
 }
+## 要理解上述代码，一定要先看一下文件的格式，先了解你的数据；为了避免读入数据过大，我们加载线粒体基因看一下
+## 可以使用Linux的ls函数查看。我们发现前10行为metadata的内容，11行是一个空行，之后是表达矩阵
 
 ## Load in data, read in counts for the endogenous genes, ERCC spike-in transcripts and mitochondrial genes
+## 每次读入的结果都是一个list
 endo.data <- readFormat("expression_mRNA_17-Aug-2014.txt")
 spike.data <- readFormat("expression_spikes_17-Aug-2014.txt")
 mito.data <- readFormat("expression_mito_17-Aug-2014.txt")
-
+str(endo.data)
+endo.data$counts[1:6,1:6]
 
 ## We also need to rearrange the columns for the mitochondrial data, as the order is not consistent with the 
-## other files.
+## other files. 对线粒体基因的细胞重新进行排序，以求一致，我们看到顺序是不一致的。
+head(endo.data$metadata$cell_id)
+head(mito.data$metadata$cell_id)
 m <- match(endo.data$metadata$cell_id, mito.data$metadata$cell_id)
 mito.data$metadata <- mito.data$metadata[m,]
 mito.data$counts <- mito.data$counts[,m]
 
 ## In this particular dataset, some genes are represented by multiple rows corresponding to alternative genomic 
 ## locations. We sum the counts for all rows corresponding to a single gene for ease of interpretation.
-raw.names <- sub("_loc[0-9]+$", "", rownames(endo.data$counts))
+## 有些gene在基因组中会多次出现（不同的位置），需要对他们的计数结果进行合并；在这个例子中，这种类型的gene的名字会有"_loc1"
+## 这样的标注
+### 字符串的替换
+raw.names <- sub("_loc[0-9]+$", "", rownames(endo.data$counts))  # 首先我们把这些gene找到，并对结果进行替换
+?rowsum # 对同一个分类变量进行纵向求和，Compute column sums across rows of a numeric matrix-like object for each level of a grouping variable.
 new.counts <- rowsum(endo.data$counts, group=raw.names, reorder=FALSE)
 endo.data$counts <- new.counts
 
 ## The counts are then combined into a single matrix for constructing a  SingleCellExperiment object. For 
 ## convenience, metadata for all cells are stored in the same object for later access.
+## 开始构建SingleCellExperiment对象
 library(SingleCellExperiment)
-all.counts <- rbind(endo.data$counts, mito.data$counts, spike.data$counts)
+all.counts <- rbind(endo.data$counts, mito.data$counts, spike.data$counts) # 数据的纵向合并
 sce <- SingleCellExperiment(list(counts=all.counts), colData=endo.data$metadata)
 dim(sce)
+sce
 
 ## We add gene-based annotation identifying rows that correspond to each class of features. We also determine the Ensembl identifier for each row.
 ## Specifying the nature of each row.
 nrows <- c(nrow(endo.data$counts), nrow(mito.data$counts), nrow(spike.data$counts))
-is.spike <- rep(c(FALSE, FALSE, TRUE), nrows); length(is.spike)
+nrows
+is.spike <- rep(c(FALSE, FALSE, TRUE), nrows); length(is.spike) # 注意向量化操作，内源重复19805次，mito重复34次，spike-in重复57次
 is.mito <- rep(c(FALSE, TRUE, FALSE), nrows); length(is.mito)
 isSpike(sce, "Spike") <- is.spike
 
@@ -333,7 +399,7 @@ sce
 
 
 
-#################################### Quality control on the cells ####################################
+#################################### Quality control on the cells 对细胞进行质控 ####################################
 
 # The original authors of the study have already removed low-quality cells prior to data publication. 
 # Nonetheless, we compute some quality control metrics with scater (McCarthy et al. 2017) to check whether the 
@@ -349,6 +415,9 @@ sce # 查看sce，发现最大的区别在于colData从原来的10列变成现�
 ## reads after fragmentation. In addition, the spike-in proportions are more variable than observed in the 416B 
 ## dataset. This may reflect a greater variability in the total amount of endogenous RNA per cell when many cell 
 ## types are present.
+## 作者在这里对数据的结果进行了解释。首先数据量比下面采用reads counts的结果要少一个数量级，这是因为使用UMI的策略，每个转录本
+## 只产生一个UMI，然而可以产生多个reads（经过reads打断以后）。另外spike-in的比例的变异度较大，这也提示了细胞内原有的RNA
+## 数量的变异度很大。这是可以理解的，因为神经细胞当中的细胞种类数目很多。
 names(colData(sce))
 par(mfrow=c(2,2), mar=c(5.1, 4.1, 0.1, 0.1))
 hist(sce$total_counts/1e3, xlab="Library sizes (thousands)", main="",  # 使用$符号可以从SingleCellExperiment里面提取所有colData的信息，相当于对细胞进行质控
@@ -359,14 +428,17 @@ hist(sce$pct_counts_Spike, xlab="ERCC proportion (%)",
      ylab="Number of cells", breaks=20, main="", col="grey80")
 hist(sce$pct_counts_Mt, xlab="Mitochondrial proportion (%)", 
      ylab="Number of cells", breaks=20, main="", col="grey80")
+### Histograms of QC metrics including the library sizes, number of expressed genes and proportion of UMIs assigned to spike-in 
+### transcripts or mitochondrial genes for all cells in the brain dataset
 
 
 ## We remove small outliers for the library size and the number of expressed features, and large outliers for 
 ## the spike-in proportions. Again, the presence of spike-in transcripts means that we do not have to use the 
-## mitochondrial proportions.
+## mitochondrial proportions. 有spike-in的存在，线粒体基因的比例就不是很重要了。
 ## 这边nmads的参数含义是“A numeric scalar, specifying the minimum number of MADs away from median required for 
 ## a value to be called an outlier.” MAD的意思是中位绝对偏差；我们滤除reads counts数，检测的gene数偏少，和那些
-## spike-in比例偏高的细胞
+## spike-in比例偏高的细胞。
+## 以下每一个结果，包括上面以is开头的函数，返回的都是每个细胞针对该筛选条件得到的True or False的结论。
 libsize.drop <- isOutlier(sce$total_counts, nmads=3, type="lower", log=TRUE)
 feature.drop <- isOutlier(sce$total_features, nmads=3, type="lower", log=TRUE)
 spike.drop <- isOutlier(sce$pct_counts_Spike, nmads=3, type="higher")
@@ -374,7 +446,9 @@ spike.drop <- isOutlier(sce$pct_counts_Spike, nmads=3, type="higher")
 
 ## Removal of low-quality cells is then performed by combining the filters for all of the metrics. The majority 
 ## of cells are retained, which suggests that the original quality control procedures were generally adequate.
+sce
 sce <- sce[,!(libsize.drop | feature.drop | spike.drop)]
+sce  # 从原来3005个细胞过滤后，变为2987个细胞
 data.frame(ByLibSize=sum(libsize.drop), ByFeature=sum(feature.drop), 
            BySpike=sum(spike.drop), Remaining=ncol(sce))
 ### We could improve our cell filtering procedure further by setting batch in isOutlier to one or more known 
@@ -382,26 +456,41 @@ data.frame(ByLibSize=sum(libsize.drop), ByFeature=sum(feature.drop),
 ### improve power to remove low-quality cells. However, for simplicity, we will not do this as sufficient 
 ### quality control has already been performed.
 
-#################################### Cell cycle classifications ####################################
+#################################### Cell cycle classifications 细胞周期的鉴定 ####################################
+# 使用scran包中的cyclone函数对细胞周期进行判断，当然我们需要家在Ensembl的identifiers来match up预先定义的classifier
 library(scran)
 mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", package="scran")) # 目前有人和小鼠的数据，暂无zebrafish的数据
 assignments <- cyclone(sce, mm.pairs, gene.names=rowData(sce)$ENSEMBL) # 这一步很耗时
-table(assignments$phase)
+table(assignments$phase) # 返回统计结果，scran包中的cyclone函数目前只能返回3个周期的结果
 par(mfrow = c(1,1), mar = c(5,5,3,2))
 plot(assignments$score$G1, assignments$score$G2M, xlab="G1 score", ylab="G2/M score", pch=16)
 
-#################################### Examining gene-level metrics ####################################
+# 得到每个细胞的各种周期的得分，那么就可以制作热图啦：
+head(assignments$scores)
+pheatmap::pheatmap(t(assignments$scores))
+
+## However, the intepretation of this result requires some caution due to differences between the training and test datasets. 
+## The classifier was trained on C1 SMARTer data and accounts for the biases in that protocol. The brain dataset uses UMI 
+## counts, which has a different set of biases, e.g., 3’-end coverage only, no length bias, no amplification noise. Furthermore, 
+## many neuronal cell types are expected to lie in the G0 resting phase, which is distinct from the other phases of the cell 
+## cycle (Coller, Sang, and Roberts 2006). cyclone will generally assign such cells to the closest known phase in the training 
+## set, which would be G1.
+
+
+#################################### Examining gene-level metrics 探索表达数据 ####################################
 # Figure 3 shows the most highly expressed genes across the cell population in the brain dataset. This is 
 # mostly occupied by spike-in transcripts, reflecting the use of spike-in concentrations that span the entire 
 # range of expression. There are also a number of constitutively expressed genes, as expected.
+# 正如我们预期的，spike-in数据和管家基因的表达最高
 fontsize <- theme(axis.text=element_text(size=12), axis.title=element_text(size=16))
 plotQC(sce, type = "highest-expression", n=50) + fontsize # 这步非常耗时，导出图片也非常耗时
 
 # Gene abundance is quantified by computing the average count across all cells (Figure 4). As previously 
-# mentioned, the UMI count is generally lower than the read count.
+# mentioned, the UMI count is generally lower than the read count. 根据细胞内表达的基因的average count数量绘制直方图
 ave.counts <- calcAverage(sce, use_size_factors=FALSE)
 hist(log10(ave.counts), breaks=100, main="Histogram of log-average counts for all genes in the brain dataset", 
      col="grey", xlab=expression(Log[10]~"average count"))
+## Histogram of log-average counts for all genes in the brain dataset
 
 # We save the average counts into the SingleCellExperiment object for later use. We also remove genes that have 
 # average counts of zero, as this means that they are not expressed in any cell.
@@ -411,7 +500,7 @@ sce <- sce[to.keep,]
 summary(to.keep)
 
 
-############################## Normalization of cell-specific biases ##############################
+############################## Normalization of cell-specific biases 去除细胞特异的混杂因素 ##############################
 # For endogenous genes, normalization is performed using the computeSumFactors function as previously described. 
 # Here, we cluster similar cells together and normalize the cells in each cluster using the deconvolution method 
 # (Lun, Bach, and Marioni 2016). This improves normalization accuracy by reducing the number of DE genes between 
@@ -421,13 +510,18 @@ summary(to.keep)
 # We use a average count threshold of 0.1 to define high-abundance genes to use during normalization. 
 # This is lower than the default threshold of min.mean=1 in  computeSumFactors, reflecting the fact that UMI 
 # counts are generally smaller than read counts.
-clusters <- quickCluster(sce, min.mean=0.1, method="igraph")
+# 首先进行quickCluster，将类似的细胞归类为一个cluster，然后使用deconvolution方法对每一个cluster进行归一化
+# 这一步有助于减少在同一个cluster中差异基因的数量
+clusters <- quickCluster(sce, min.mean=0.1, method="igraph") 
+## 注意这边因为是UMI，所以我们将high-abundance genes的阈值降到0.1
 ## quickCluster uses distances based on Spearman’s rank correlation for clustering. This ensures that scaling 
 ## biases in the counts do not affect clustering, but yields very coarse clusters and is not recommended for 
-## biological interpretation.
+## biological interpretation. quickCluster采用的是Spearman秩和相关性，这样规避了counts数对cluster的影响，但是
+## 其产生的结果是一个非常粗略的结果，不建议对其进行生物学的解释。
 ## For large datasets, using method="igraph" in quickCluster will speed up clustering. This uses a graph-based 
-## clustering algorithm - see ?buildSNNGraph for more details.
+## clustering algorithm - see ?buildSNNGraph for more details. 'igraph'意味着使用了graph-based clustering算法
 
+# 对于内源基因，我们还是采用computeSumFactors的方法。
 sce <- computeSumFactors(sce, cluster=clusters, min.mean=0.1)
 ## Only a rough clustering is required to avoid pooling together very different cell types in  computeSumFactors. 
 ## The function is robust to a moderate level of differential expression between cells in the same cluster.
@@ -441,47 +535,90 @@ summary(sizeFactors(sce))
 # the size factors are estimated based on median ratios and are more robust to the presence of DE between cells.
 plot(sizeFactors(sce), sce$total_counts/1e3, log="xy",
      ylab="Library size (thousands)", xlab="Size factor")
+## Size factors from deconvolution, plotted against library sizes for all cells in the brain dataset. axis on a log-scale
 
 # We also compute size factors specific to the spike-in set, as previously described.
 sce <- computeSpikeFactors(sce, type="Spike", general.use=FALSE)
 
 # Finally, normalized log-expression values are computed for each endogenous gene or spike-in transcript using 
 # the appropriate size factors.
+sce  # assay目前只有counts这一个slot
 sce <- normalize(sce) # assays增加了logcounts这个slot
 
 
-############################## Modelling and removing technical noise ##############################
+############################## Modelling and removing technical noise 去除technical noise并寻找HVGs ##############################
+# 说白了，这一步就是分解出biological variance，然后找到HVGs
+# We model the technical noise by fitting a mean-variance trend to the spike-in transcripts
+# 根据spike-in的variance去除表达的technical noise
+# In theory, we should block on the plate of origin for each cell. However, only 20-40 cells are available on each 
+# plate, and the population is also highly heterogeneous. This means that we cannot assume that the distribution of 
+# sampled cell types on each plate is the same. Thus, to avoid regressing out potential biology, we will not block 
+# on any factors in this analysis.
 var.fit <- trendVar(sce, parametric=TRUE, loess.args=list(span=0.4))
 var.out <- decomposeVar(sce, var.fit)
+?decomposeVar   # 分解variance
+
+# Figure 6 indicates that the trend is fitted accurately to the technical variances. The technical and total variances 
+# are also much smaller than those in the 416B dataset. This is due to the use of UMIs, which reduces the noise caused 
+# by variable PCR amplification (Islam et al. 2014). Furthermore, the spike-in trend is consistently lower than the 
+# variances of the endogenous genes. This reflects the heterogeneity in gene expression across cells of different types.
 plot(var.out$mean, var.out$total, pch=16, cex=0.6, xlab="Mean log-expression", 
      ylab="Variance of log-expression")
 points(var.out$mean[isSpike(sce)], var.out$total[isSpike(sce)], col="red", pch=16)
 curve(var.fit$trend(x), col="dodgerblue", add=TRUE, lwd=2)
-chosen.genes <- order(var.out$bio, decreasing=TRUE)[1:10]
+## Variance of normalized log-expression values against the mean for each gene, calculated across all cells in the brain 
+## dataset after blocking on the sex effect
+## The blue line represents the mean-dependent trend in the technical variance of the spike-in transcripts (also 
+## highlighted as red points).
+
+# We check the distribution of expression values for the genes with the largest biological components to ensure that 
+# they are not driven by outliers (Figure 7). Some tweaking of the  plotExpression parameters is necessary to visualize 
+# a large number of cells. 我们查看一下这些变异度最大的基因，并且观察一下它们非常大的变异度是否来自于离群值
+# 说白了，这一步就是分解出biological variance，然后找到HVGs
+chosen.genes <- order(var.out$bio, decreasing=TRUE)[1:10]    # bio的意思是这个变异是来自于biology而非technical
 plotExpression(sce, rownames(var.out)[chosen.genes], 
-               alpha=0.05, jitter="jitter") + fontsize
+               alpha=0.05, jitter="jitter") + fontsize  # 对plotExpression函数内的参数进行微调以容纳更多的点
+## Violin plots of normalized log-expression values for the top 10 HVGs in the brain dataset
+## For each gene, each point represents the log-expression value for an individual cell.
+
+
+# PCA分析进行数据降维去除噪声，找到真正有意义的PC
+# Finally, we use PCA to denoise the expression values, yielding a set of coordinates for each cell where the technical 
+# noise has been removed. Setting approximate=TRUE in denoisePCA will perform an approximate singular value decomposition, 
+# using methods from the irlba package. This is much faster than the exact algorithm on large datasets without much loss 
+# of accuracy.
 sce <- denoisePCA(sce, technical=var.fit$trend, approximate=TRUE)
 ncol(reducedDim(sce, "PCA"))
 sce # 增加了reducedDimNames
 
-########################## Data exploration with dimensionality reduction ##########################
+########################## Data exploration with dimensionality reduction 数据降维 ##########################
 # We perform dimensionality reduction on the denoised PCs to check if there is any substructure. 
 # Cells separate into clear clusters in the t-SNE plot (Van der Maaten and Hinton 2008) in Figure 8, 
 # corresponding to distinct subpopulations. This is consistent with the presence of multiple cell types in the 
 # diverse brain population. We increase the perplexity to favour visualization of the overall structure at the 
 # expense of local scale.
-sce <- runTSNE(sce, use_dimred="PCA", perplexity=50, rand_seed=1000)
+# 在PCA的基础上进一步数据降维可视化，使用t-SNE。我们可以比较不同perplexity的情况，perplexity越大，越能反映数据的
+# 整体结构，但是会牺牲一部分局部scale。
+sce <- runTSNE(sce, use_dimred="PCA", perplexity=20, rand_seed=1000) # 绘图点之间会比较疏远/稀疏
+sce <- runTSNE(sce, use_dimred="PCA", perplexity=50, rand_seed=1000) # 同一个cluster的点会比较紧密
 tsne1 <- plotTSNE(sce, colour_by="Neurod6") + fontsize
 tsne2 <- plotTSNE(sce, colour_by="Mog") + fontsize
 multiplot(tsne1, tsne2, cols=2)
+## t-SNE plots constructed from the denoised PCs of the brain dataset
+## Each point represents a cell and is coloured according to its expression of Neurod6 (left) or Mog (right).
+
 
 # The PCA plot is less effective at separating cells into many different clusters (Figure 9). 
 # This is because the first two PCs are driven by strong differences between specific subpopulations, 
 # which reduces the resolution of more subtle differences between some of the other subpopulations. 
 # Nonetheless, some substructure is still visible.
+# PCA在进行区分的时候会less effective，这是因为前两个PC主要是由几个差异比较大的subpopulation(的gene)来贡献的
+# 因此在区分差异比较小的subpopulation的时候，分辨率就会非常低。
 pca1 <- plotReducedDim(sce, use_dimred="PCA", colour_by="Neurod6") + fontsize
 pca2 <- plotReducedDim(sce, use_dimred="PCA", colour_by="Mog") + fontsize
 multiplot(pca1, pca2, cols=2)
+## PCA plots constructed from the denoised PCs of the brain dataset
+## Each point represents a cell and is coloured according to its expression of the Neurod6 (left) or Mog (right).
 
 ## For both methods, we colour each cell based on the expression of a particular gene. This is a 
 ## useful strategy for visualizing changes in expression across the lower-dimensional space. 
@@ -489,7 +626,7 @@ multiplot(pca1, pca2, cols=2)
 ## particular cell types. For example, Mog can be used to identify clusters corresponding to 
 ## oligodendrocytes.
 
-########################## Clustering cells into putative subpopulations ##########################
+########################## Clustering cells into putative subpopulations 对细胞进行clustering ##########################
 # The reduced dimension coordinates are used to cluster cells into putative subpopulations. 
 # We do so by constructing a shared-nearest-neighbour graph (Xu and Su 2015), in which cells 
 # are the nodes and edges are formed between cells that share nearest neighbours. Clusters are 
@@ -499,10 +636,19 @@ multiplot(pca1, pca2, cols=2)
 # 共享最近邻聚类算法: Decreasing the number of neighbours k in buildSNNGraph will reduce the 
 # connectivity of the graph. This will generally result in the formation of smaller clusters 
 # (Xu and Su 2015), which may be desirable if greater resolution is required.
-snn.gr <- buildSNNGraph(sce, use.dimred="PCA")
-cluster.out <- igraph::cluster_walktrap(snn.gr)
+# scater包提倡在进行聚类的时候（给每个细胞赋予一个cluster），采用share-nearest-neighbour graph方法
+# 在这个方法中，细胞是node，而edge则是共享最近邻近聚类的细胞的关系。所以最后cluster的产生是被定义
+# 为图中高度连结的一群点/细胞。这个方法比传统的计算点与点之间的pairwise distance矩阵，然后得到的层次
+# 聚类结果会更加高效。在igraph包中整合了很多基于graph-based的clustering方法，其中walktrap算法作为
+# 一个默认算法，是非常推荐使用的。
+snn.gr <- buildSNNGraph(sce, use.dimred="PCA")  # 注意k的默认值为10，关于k的解释看下方注释
+?buildSNNGraph
+cluster.out <- igraph::cluster_walktrap(snn.gr)   # 使用了walktrap算法。
 my.clusters <- cluster.out$membership
-table(my.clusters)
+table(my.clusters)  # 与tutorial有的结果稍有不同
+## Decreasing the number of neighbours k in buildSNNGraph will reduce the connectivity of the graph. This will 
+## generally result in the formation of smaller clusters (Xu and Su 2015), which may be desirable if greater 
+## resolution is required.
 
 # The modularity score provides a global measure of clustering performance for community 
 # detection methods. Briefly, it compares the number of within-cluster edges to the expected 
@@ -513,7 +659,7 @@ table(my.clusters)
 # Notice that we do not run library(igraph), but instead use igraph:: to extract methods from 
 # the package. This is because igraph contains a normalize method that will override its 
 # counterpart from scater, resulting in some unusual bugs.
-igraph::modularity(cluster.out)
+igraph::modularity(cluster.out)   # 这个值越大(越接近1)则说明聚类的结果越优异。
 
 
 # We further investigate the clusters by examining the total weight of edges for each pair of 
@@ -521,38 +667,66 @@ igraph::modularity(cluster.out)
 # null model, similar to the modularity calculation. Most clusters contain more internal links 
 # than expected (Figure 10), while links between clusters are fewer than expected. This indicates 
 # that we successfully clustered cells into highly-connected communities.
+# 这张图也是来评估cluster分的好不好，理论上一个cluster的细胞，edge会越高，而不同cluster的细胞之间
+# 的edge会越低。
 mod.out <- clusterModularity(snn.gr, my.clusters, get.values=TRUE)
 ratio <- log10(mod.out$observed/mod.out$expected + 1)
 library(pheatmap)
 pheatmap(ratio, cluster_rows=FALSE, cluster_cols=FALSE, 
          color=colorRampPalette(c("white", "blue"))(100))
+## Heatmap of the log10-ratio of the total weight (edge) between nodes in the same cluster or in different clusters, 
+## relative to the total weight expected under a null model of random links
 
 # We visualize the cluster assignments for all cells on the t-SNE plot in Figure 11. Adjacent 
 # cells are generally assigned to the same cluster, indicating that the clustering procedure was 
 # applied correctly.
 sce$cluster <- factor(my.clusters)
 plotTSNE(sce, colour_by="cluster") + fontsize
-
+## t-SNE plot of the denoised PCs of the brain dataset
+## Each point represents a cell and is coloured according to its assigned cluster identity.
 
 # An alternative approach is to use graph-based visualizations such as force-directed layouts 
 # (Figure 12). These are appealing as they directly represent the relationships used during 
 # clustering. However, convergence tends to be slow for large graphs, so some tinkering with 
 # niter= may be required to ensure that the results are stable.
+# 在数据呈现上，出了t-SNE以外，我们也可以干脆使用graph-based visualization，比如force-directed layouts
+# 它的好处是直接可以图形化反应clustering算法的结果，但是convergence非常缓慢，需要我们添加参数让结果
+# 更加稳健。
 set.seed(2000)
 reducedDim(sce, "force") <- igraph::layout_with_fr(snn.gr, niter=5000)
 plotReducedDim(sce, colour_by="cluster", use_dimred="force")
+## Force-directed layout for the shared nearest-neighbour graph of the brain dataset
+## Each point represents a cell and is coloured according to its assigned cluster identity.
+
+## 对于一些比较大的数据集，我们上述的步骤分出来的群可能也只是第一次粗分，后续需要subset某个群进一步细分。
+## Very heterogeneous datasets may yield a few large clusters on the first round of clustering. It can be useful to 
+## repeat the variance modelling, denoising and clustering using only the cells within each of the initial clusters. 
+## This can be achieved by subsetting sce according to a particular level of my.clusters, and re-applying the relevant 
+## functions on the subset. Doing so may focus on a different set of genes that define heterogeneity within an initial 
+## cluster, as opposed to those that define differences between the initial clusters. This would allow fine-scale 
+## structure within each cluster to be explored at greater resolution. For simplicity, though, we will only use the broad 
+## clusters corresponding to clear subpopulations in this workflow.
 
 
-########################## Detecting marker genes between subpopulations ##########################
+########################## Detecting marker genes between subpopulations 寻找不同subpopulation的marker gene ##########################
 # We use the findMarkers function with direction="up" to identify upregulated marker genes for 
 # each cluster. As previously mentioned, we focus on upregulated genes as these can quickly 
 # provide positive identification of cell type in a heterogeneous population. We examine the 
 # table for cluster 1, in which log-fold changes are reported between cluster 1 and every other 
 # cluster. The same output is provided for each cluster in order to identify genes that 
 # discriminate between clusters.
+# 我们使用findMarkers函数并且定义参数direction = "up" 来鉴定上调的marker genes
 markers <- findMarkers(sce, my.clusters, direction="up")
 marker.set <- markers[["1"]]
 head(marker.set[,1:8], 10) # only first 8 columns, for brevity
+?overlapExprs
+groups <- sample(3, ncol(sce), replace=TRUE)
+out <- overlapExprs(sce, groups, subset.row=1:10)
+out
+## 我们也可以使用overlapExprs函数来总结每个cluster的差异
+## The overlapExprs function may also be useful here, to prioritize candidates where there is clear separation 
+## between the distributions of expression values of different clusters. This differs from findMarkers, which is 
+## primarily concerned with the log-fold changes in average expression between clusters.
 
 # We save the list of candidate marker genes for further examination, using compression to 
 # reduce the file size.
@@ -569,7 +743,9 @@ top.markers <- rownames(marker.set)[marker.set$Top <= 10]
 plotHeatmap(sce, features=top.markers, columns=order(my.clusters),
             colour_columns_by="cluster", cluster_cols=FALSE, 
             center=TRUE, symmetric=TRUE, zlim=c(-5, 5))
-
+## Heatmap of mean-centred and normalized log-expression values for the top set of markers for cluster 1 in the 
+## brain dataset
+## Column colours represent the cluster to which each cell is assigned, as indicated by the legend.
 
 ################################## Concluding remarks ##################################
 # Having completed the basic analysis, we save the SingleCellExperiment object with its associated 
@@ -581,11 +757,11 @@ saveRDS(file="brain_data.rds", sce)
 
 #==============================================================================================
 #
-#                   2. Analyzing single-cell RNA-seq data containing read counts
+#             2. Analyzing single-cell RNA-seq data containing read counts (SMART-seq2)
 #
 #==============================================================================================
 
-############################################ Overview ############################################
+############################################ Overview 项目简介 ############################################
 
 # In this workflow, we use a relatively simple dataset (Lun et al. 2017) to introduce most of the 
 # concepts of scRNA-seq data analysis. This dataset contains two plates of 416B cells (an immortalized 
@@ -595,6 +771,8 @@ saveRDS(file="brain_data.rds", sce)
 # expression of each gene was quantified by counting the total number of reads mapped to its exonic 
 # regions. Similarly, the quantity of each spike-in transcript was measured by counting the number of 
 # reads mapped to the spike-in reference sequences. 
+# SMART-seq2建库方案，ERCC spike-in (mapping to spike-in reference sequence)，count reads mapping to 
+# exonic region
 
 # 注意，在上游数据处理的时候：
 # Some feature-counting tools will report mapping statistics in the count matrix (e.g., the number of 
@@ -603,7 +781,10 @@ saveRDS(file="brain_data.rds", sce)
 # the colData) prior to further analyses.
 
 
-##################################### Setting up the data #####################################
+##################################### Setting up the data 构建数据对象 #####################################
+
+#----------------------# Load in count matrix 读取数据（密集矩阵） #----------------------#
+# 建议先在终端查看一下matrix，通过观察这个tsv格式的文件，发现是常规的表达矩阵数据，密集矩阵的形式
 # One matrix was generated for each plate of cells used in the study.
 # unzip("E-MTAB-5522.processed.1.zip"). Unzip once. 这里我们关注标明“Calero”的数据集
 # Reading in the count tables for each of the two plates.
@@ -620,6 +801,7 @@ rbind(Plate1=dim(plate1), Plate2=dim(plate2)) # 两个文件中均有96个细胞
 
 # We combine the two matrices into a single object for further processing. This is done after 
 # verifying that the genes are in the same order between the two matrices.
+# 在对两个数据进行合并的时候(横向合并)，必须事先确认gene名是不是个数和顺序是一样的
 stopifnot(identical(rownames(plate1), rownames(plate2)))
 all.counts <- cbind(plate1, plate2)
 
@@ -628,6 +810,7 @@ all.counts <- cbind(plate1, plate2)
 # counts for synchronized manipulation throughout the workflow.
 library(SingleCellExperiment)
 sce <- SingleCellExperiment(list(counts=all.counts)) # 构建SingleCellExperiment对象的时候最少只需要输入矩阵信息
+sce   # rownames和colnames自动载入了；但是rowData和colData都为空
 rowData(sce)$GeneLength <- gene.lengths
 sce # assays中只有一个slot，是'counts'
 
@@ -639,28 +822,32 @@ sce # assays中只有一个slot，是'counts'
 # matrix are gene symbols. An ERCC gene family actually exists in human annotation, so this would 
 # result in incorrect identification of genes as spike-in transcripts. This problem can be avoided by 
 # publishing count matrices with standard identifiers (e.g., Ensembl, Entrez).
+# 这边需要注意的是基因名是ensembl id，因为ERCC与人的gene symbol在正则表达式中会有一些重合，所以处理的时候
+# 一定要小心，建议看一下选出来的ERCC到底有哪些，以避免把内源基因给排除了。
 isSpike(sce, "ERCC") <- grepl("^ERCC", rownames(sce)) # isSpike是sce这个SingleCellExperiment对象中的一个单元
-row.names(sce)[grepl("^ERCC", rownames(sce))] # 可以用这句代码来查看ERCC的标签
+row.names(sce)[grepl("^ERCC", rownames(sce))] # 可以用这句代码来查看具体每个ERCC的标签
 summary(isSpike(sce, "ERCC")) # 或者用table函数也可以
 
 # This dataset is slightly unusual in that it contains information from another set of spike-in 
 # transcripts, the Spike-In RNA Variants (SIRV) set. For simplicity, we will only use the ERCC 
 # spike-ins in this analysis. Thus, we must remove the rows corresponding to the SIRV transcripts 
 # prior to further analysis, which can be done simply by subsetting the  SingleCellExperiment object.
+# 这个数据集有两套spike-in，一套是ERCC spike-in，另一套是SIRV spike-in。我们剔除SIRV spike-in
 is.sirv <- grepl("^SIRV", rownames(sce))
 rownames(sce)[is.sirv] # 可以用这句代码来查看以‘SIRV’开头的另一套spike-in标签
 sce <- sce[!is.sirv,] 
 summary(is.sirv)
-sce # SIRV不是常规使用的spike-in，所以在SingleCellExperiment对象中并没有对应的存储单元
+sce # SIRV不是常规使用的spike-in
 
 
-# Incorporating cell-based annotation
+#----------------------# Incorporating cell-based annotation 追加细胞的注释信息 #----------------------#
 # We load in the metadata for each library/cell from the sdrf.txt file. It is important to check that 
 # the rows of the metadata table are in the same order as the columns of the count matrix. Otherwise, 
 # incorrect metadata will be assigned to each cell. metadata的列名和matrix的行名必须完全一致，尤其是顺序。
 metadata <- read.delim("E-MTAB-5522.sdrf.txt", check.names=FALSE, header=TRUE)
 head(metadata) # 在这个文件中，metadata的行名存储在列名为“Source Name"(实际为第一列)
 m <- match(colnames(sce), metadata[["Source Name"]]) # Enforcing identical order，检测是否匹配
+?match   # match returns a vector of the positions of (first) matches of its first argument in its second.
 stopifnot(all(!is.na(m))) # Checking that nothing's missing.
 metadata <- metadata[m,]
 head(colnames(metadata))
@@ -677,7 +864,7 @@ levels(pheno) <- c("induced", "control") # 根据因子型变量的首字母在�
 colData(sce)$Oncogene <- pheno
 table(colData(sce)$Oncogene, colData(sce)$Plate)
 
-# Incorporating gene-based annotation
+#----------------------# Incorporating gene-based annotation 追加基因的注释信息 #----------------------#
 # Feature-counting tools typically report genes in terms of standard identifiers from Ensembl or 
 # Entrez. These identifiers are used as they are unambiguous and highly stable. However, they are 
 # difficult to interpret compared to the gene symbols which are more commonly used in the literature. 
@@ -696,7 +883,7 @@ table(is.na(rowData(sce)$SYMBOL))  # 有相当一部分Ensembl id不能对应到
 # It is often desirable to rename the row names of sce to the gene symbols, as these are easier to 
 # interpret. However, this requires some work to account for missing and duplicate symbols. The code 
 # below will replace missing symbols with the Ensembl identifier and concatenate duplicated symbols 
-# with the (unique) Ensembl identifiers.
+# with the (unique) Ensembl identifiers. 将missing symbol和duplicated symbol都替换成ensembl gene id
 new.names <- rowData(sce)$SYMBOL
 missing.name <- is.na(new.names)
 new.names[missing.name] <- rowData(sce)$ENSEMBL[missing.name]
@@ -707,22 +894,24 @@ head(rownames(sce))
 
 # We also determine the chromosomal location for each gene using the TxDb.Mmusculus.UCSC.mm10.ensGene 
 # package. This will be useful later as several quality control metrics will be computed from rows 
-# corresponding to mitochondrial genes.
+# corresponding to mitochondrial genes. 因为QC步骤涉及到线粒体基因，所以有必要添加染色体的信息
 library(TxDb.Mmusculus.UCSC.mm10.ensGene)
 location <- mapIds(TxDb.Mmusculus.UCSC.mm10.ensGene, keys=rowData(sce)$ENSEMBL, 
                    keytype="GENEID", column="CDSCHROM")
+table(location) # 查看一下线粒体基因的染色体标签名
 rowData(sce)$CHR <- location
 summary(location=="chrM")
 
 
-##################################### Quality control on the cells #####################################
-# Defining the quality control metrics
+##################################### Quality control on the cells 针对细胞的QC #####################################
+#----------------------# Defining the quality control metrics 构建QC matrix #----------------------#
 # Cells with small library sizes are of low quality as the RNA has not been efficiently captured 
 # (i.e., converted into cDNA and amplified) during library preparation.
 
 # The number of expressed features in each cell is defined as the number of features with non-zero 
 # counts for that cell. Any cell with very few expressed genes is likely to be of poor quality as the 
-# diverse transcript population has not been successfully captured.
+# diverse transcript population has not been successfully captured. 
+# 测序文库特别小的细胞是低质量细胞；检测到的基因�数少的是低质量细胞
 
 # The proportion of reads mapped to spike-in transcripts is calculated relative to the library size 
 # for each cell. High proportions are indicative of poor-quality cells, where endogenous RNA has been 
@@ -736,7 +925,8 @@ summary(location=="chrM")
 # The reasoning is that mitochondria are larger than individual transcript molecules and less likely to escape 
 # through tears in the cell membrane.
 # 在没有spike-in的情况下，使用线粒体基因的转录本也可以用于cell quality control；过高比例的线粒体基因转录本
-# 提示细胞破损。
+# 提示细胞破损。毕竟线粒体多了一个细胞膜（还是双层的）不容易破损，里面的线粒体RNA不容易丢失，而细胞质内的RNA
+# 容易收到细胞破损的影响而丢失。
 
 # For each cell, we calculate these quality control metrics using the calculateQCMetrics function 
 # from the scater package (McCarthy et al. 2017). These are stored in the row- and column-wise 
@@ -749,13 +939,18 @@ head(colnames(colData(sce)), 10)
 # The distributions of these metrics are shown in Figure 1, stratified by oncogene induction status 
 # and plate of origin. The aim is to remove putative low-quality cells that have low library sizes, 
 # low numbers of expressed features, and high spike-in (or mitochondrial) proportions.
+# 新增了一列叫PlateOnco
 sce$PlateOnco <- paste0(sce$Oncogene, ".", sce$Plate)
+table(sce$PlateOnco) # 是一个分类变量
 multiplot(                  # multiplot是ggplot2下的函数
   plotColData(sce, y="total_counts", x="PlateOnco"),
   plotColData(sce, y="total_features", x="PlateOnco"),
   plotColData(sce, y="pct_counts_ERCC", x="PlateOnco"),
   plotColData(sce, y="pct_counts_Mt", x="PlateOnco"),
   cols=2)
+## Distributions of various QC metrics for all cells in the 416B dataset
+## This includes the library sizes, number of expressed genes, and proportion of reads mapped to spike-in transcripts 
+## or mitochondrial genes.
 
 # Generally, they will be in rough agreement, i.e., cells with low total counts will also have low 
 # numbers of expressed features and high ERCC/mitochondrial proportions. Clear discrepancies may 
@@ -768,8 +963,10 @@ plot(sce$total_features, sce$pct_counts_ERCC, xlab="Number of expressed genes",
      ylab="ERCC proportion (%)")
 plot(sce$total_features, sce$pct_counts_Mt, xlab="Number of expressed genes",
      ylab="Mitochondrial proportion (%)")
+## Behaviour of each QC metric compared to the total number of expressed features
+## Each point represents a cell in the 416B dataset.
 
-# Identifying outliers for each metric
+#----------------------# Identifying outliers for each metric 找到并排除离群值 #----------------------#
 # 有的时候阈值的设定非常的tricky，我们不妨就假设大部分的cell都是high quality的，那么在离群值范围的
 # 细胞我们就认为是低质量的细胞，需要filter掉。Outliers are defined based on the median absolute 
 # deviation (MADs) from the median value of each metric across all cells. We remove cells with 
@@ -777,14 +974,23 @@ plot(sce$total_features, sce$pct_counts_Mt, xlab="Number of expressed genes",
 # improves resolution at small values, especially when the MAD of the raw values is comparable to or 
 # greater than the median. We also remove cells where the log-transformed number of expressed genes 
 # is 3 MADs below the median value. 我们使用的是中位绝对偏差，我们讲检测到的library size(counts)和gene
-# 数在3个MADs以下的排除掉
+# 数在3个MADs以下的排除掉；在进行MAD之前，先对数据进行log转换，这对非常小的数值的分析有帮助(improve
+# resolution at small value，尤其是MAD比median还要大的情况下)
+# 分别对reads count和feature�数进行过滤。
 libsize.drop <- isOutlier(sce$total_counts, nmads=3, type="lower",  # isOutlier()是scater包的内置函数
-                          log=TRUE, batch=sce$PlateOnco)
+                          log=TRUE, batch=sce$PlateOnco)    # 自带了log=这个参数
 feature.drop <- isOutlier(sce$total_features, nmads=3, type="lower", 
                           log=TRUE, batch=sce$PlateOnco)
+## The batch= argument ensures that outliers are identified within each level of the specified plate/oncogene 
+## factor. This allows isOutlier() to accommodate systematic differences in the QC metrics across plates 
+## (Figure 1), which can arise due to technical differences in processing (e.g., differences in sequencing depth) 
+## rather than any changes in quality. The same reasoning applies to the oncogene induction status, where induced 
+## cells may have naturally fewer expressed genes for biological reasons. Failing to account for these systematic 
+## differences would inflate the MAD estimate and compromise the removal of low-quality cells.
+
 
 # 我们也要滤除spike-in比例过高的细胞，为了更加清楚的展示(因为发现离群值中的大值)，我们不对ERCC的percentage
-# 进行log转换
+# 进行log转换，在有ERCC spike-in的情况下，就没有必要用线粒体基因作为参照了。
 spike.drop <- isOutlier(sce$pct_counts_ERCC, nmads=3, type="higher",
                         batch=sce$PlateOnco)
 
@@ -803,16 +1009,16 @@ saveRDS(sce, file="416B_preQC.rds")
 sce # before cell QC，192个细胞
 sce <- sce[,keep]
 dim(sce) # after cell QC，183个细胞
+## 我们发现有些细胞可能在多个条件上都不满足
 
-
-################################### Classification of cell cycle phase ###################################
+################################### Classification of cell cycle phase 细胞周期的鉴定 ###################################
 # 英国 Sanger 研究院的 Teichmann 等人就开发了一款单细胞隐藏 可变模型 (single-cell latent variable model, 
 # scLVM) 和 Cyclone 软件。Cyclone 软 件可以利用机器学习技术和统计学的方法， 将细胞周期信息与单细胞 RNA 
-# 测序数据结合起来，来帮助我们判断哪些基因表达信号与细胞 周期的哪个阶段有关。对于任何单细胞的 RNA 测序数
-# 据，使用 Cyclone 软件就能够使其与每一个细 胞在细胞周期中所处的阶段一一对应。两者的 scLVM 就采用了在整个
-# 细胞周期中表达程度高 度可变的基因作为研究对象，来明确基因表达 与细胞周期的关系。他们确定了某一种决定细
+# 测序数据结合起来，来帮助我们判断哪些基因表达信号与细胞周期的哪个阶段有关。对于任何单细胞的 RNA 测序数
+# 据，使用 Cyclone 软件就能够使其与每一个细胞在细胞周期中所处的阶段一一对应。两者的 scLVM 就采用了在整个
+# 细胞周期中表达程度高度可变的基因作为研究对象，来明确基因表达 与细胞周期的关系。他们确定了某一种决定细
 # 胞周期的因子，也发现了在细胞发育或分化的 整个细胞周期中，推动细胞转化的因子，而且 还发现了一些独特的亚
-# 群 (subpopulations)。设计到训练集和测试集：We use the prediction method described by Scialdone et al. 
+# 群 (subpopulations)。设计到训练集和测试集和支持向量机：We use the prediction method described by Scialdone et al. 
 # (2015) to classify cells into cell cycle phases based on the gene expression data. Using a training dataset, 
 # the sign of the difference in expression between two genes was computed for each pair of genes. Pairs with 
 # changes in the sign across cell cycle phases were chosen as markers. Cells in a test dataset can then be 
@@ -838,6 +1044,7 @@ plot(assignments$score$G1, assignments$score$G2M,
 # score; in G2/M phase if the G2/M score is above 0.5 and greater than the G1 score; and in S phase 
 # if neither score is above 0.5. Here, the vast majority of cells are classified as being in G1 phase. 
 # We save these assignments into the SingleCellExperiment object for later use.
+# 任何一个细胞期的打分高于0.5，就认为细胞处在那个期。
 sce$phases <- assignments$phases
 table(sce$phases)
 
@@ -846,6 +1053,12 @@ pheatmap::pheatmap(t(assignments$scores))
 pheatmap::pheatmap(t(assignments$normalized.scores))
 
 ## 有几个注意点：
+## To remove confounding effects due to cell cycle phase, we can filter the cells to only retain those 
+## in a particular phase (usually G1) for downstream analysis. Alternatively, if a non-negligible number 
+## of cells are in other phases, we can use the assigned phase as a blocking factor. This protects against 
+## cell cycle effects without discarding information, and will be discussed later in more detail.
+## 校正细胞周期的影响。
+
 ## The classifier may not be accurate for data that are substantially different from those used in 
 ## the training set, e.g., due to the use of a different protocol. In such cases, users can construct 
 ## a custom classifier from their own training data using the sandbag function. This will also be 
