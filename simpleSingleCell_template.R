@@ -1186,24 +1186,52 @@ legend("bottomright", col=c("red", "black"), pch=16, cex=1.2,
 ## 假设大部分基因是非差异表达的。这个方法会在上面UMI的数据（Amit Zeisel的数据集进行演示）。
 
 #----------------------# Computing separate size factors for spike-in transcripts 对spike-in计算量化因子 #----------------------#
-
+# 针对内源基因和spike-in序列的量化因子的计算是不同的：
+# 通过内源基因计算的量化因子通常情况下不能适用于spike-in序列的normalization。存在更多RNA的细胞的内源基因的count数会增多，因此需要
+# 更大的size factor把counts scale down。然而在建库的时候，使用spike-in通常是将相同量的spike-in RNA添加到每个细胞当中去。这就意味着
+# spike-in的counts数是不受内源RNA的影响的。使用内源基因的size factor来normalize spike-in会导致spike-in的over-normalization和最终
+# 导致计数错误。对于一个不变的cDNA量，任何内源RNA的量的增加会导致spike-in转录本的覆盖率的降低。因此，spike-in的量会与内源基因的
+# 量化以你呈现负相关的关系。
+# 为了确保正确的normalization，我们针对spike-in计算独立的size factor。它被定义为all transcripts in spike-in set的total counts。
+# 它基于的假设是任何一个spike-in transcript都不会是差异表达的，这是合乎情理的，因为实际上每个细胞添加了相同数量和组成的spike-in RNA。
+# 针对spike-in的量化因子会存储在SingleCellExperiment对象的一个独立的field当中（通过在computeSpikeFactors函数中的general.use = FALSE进行设定）
+# 这能够确保是专门针对spike-in的，而不是针对内源基因的。
 sce <- computeSpikeFactors(sce, type="ERCC", general.use=FALSE)
 
 #----------------------# Applying the size factors to normalize gene expression 使用量化因子来对基因表达量进行校正 #----------------------#
 
+# count data用于计算normalized log-expression，后者用于下游的分析。这里面每一个数值的含义是log2-ratio of each count to the size factor
+# for the corresponding cell, after adding a prior count of 1 to avoid undefined values at zero count.翻译成中文，就是每一个数值加1
+# 然后通过size factor进行归一化，然后log2对数转换。通过除以size factor可以确保细胞特异的bias会被remove掉。如果我们实现计算了spike-in
+# 特异的量化因子并存储到了sce对象当中，它们会被自动加载用来专门归一化spike-in序列。
+sce
 sce <- normalize(sce)
+sce  # 增加了logcounts这个slot，同时metadata增加了log.exprs.offset这个slot
+## log转化的好处是两个log数值的差值就直接反应了log2 fold change。这比绝对数要更优的原因是绝对数的解释是需要基于overall abundance的。
+## 另外log转化是variance能够更加稳定，这样离散度大，同时表达量高的gene不会在下游的分析中起到过分强大的作用。计算得到的结果会存储到logcounts
+## 这个slot里面。
 
+########################### Modelling the technical noise in gene expression 找到数据中的technical noise ###########################
 
-########################### Modelling the technical noise in gene expression ###########################
-# Fitting a trend to the spike-in variances
+#----------------------# Fitting a trend to the spike-in variances 通过spike-in拟合出technical noise #----------------------#
+
 # Variability in the observed expression values across genes can be driven by genuine biological heterogeneity 
 # or uninteresting technical noise. To distinguish between these two possibiltiies, we need to model the 
 # technical component of the variance of the expression values for each gene. We do so using the set of 
 # spike-in transcripts, which were added in the same quantity to each cell. Thus, the spike-in transcripts 
 # should exhibit no biological variability, i.e., any variance in their counts should be technical in 
 # origin.
+# 基因表达在细胞间的差异可以来自于真实的生物学的异质性，或者来源于我们不感兴趣的technical noise，我们的目的是把technical noise
+# 从中给分离出来。因为我们在每个细胞使用的同一套，并且是相同剂量的spike-in，因此spike-in转录本的差别必然不是来自于生物学上的差别，
+# 也就是说spike-in的variance是来自于technical。
 
-# We use the trendVar() function to fit a mean-dependent trend to the variances of the log-expression values for the spike-in transcripts. We set block= to block on the plate of origin for each cell, to ensure that technical differences between plates do not inflate the variances. Given the mean abundance of a gene, the fitted value of the trend is then used as an estimate of the technical component for that gene. The biological component of the variance is finally calculated by subtracting the technical component from the total variance of each gene with the decomposeVar function.
+# We use the trendVar() function to fit a mean-dependent trend to the variances of the log-expression values for the spike-in 
+# transcripts. We set block= to block on the plate of origin for each cell, to ensure that technical differences between plates 
+# do not inflate the variances. Given the mean abundance of a gene, the fitted value of the trend is then used as an estimate of 
+# the technical component for that gene. The biological component of the variance is finally calculated by subtracting the 
+# technical component from the total variance of each gene with the decomposeVar function.
+# 我们使用trendVar函数来拟合spike-in的表达平均值和log转换后的variance。variance当中的生物学成分是在每个基因中，通过total variance中减去technical
+# component得到的，实现它的函数是decomposeVar函数。
 var.fit <- trendVar(sce, parametric=TRUE, block=sce$Plate,
                     loess.args=list(span=0.3))
 var.out <- decomposeVar(sce, var.fit)
@@ -1214,24 +1242,49 @@ head(var.out)
 # increase in the variance is observed as the mean increases from zero, as larger variances are 
 # possible when the counts increase. At very high abundances, the effect of sampling noise decreases 
 # due to the law of large numbers, resulting in a decrease in the variance.
+# 我们通常会可视化一下这个trend来看基因之间的差异和spike-in的variance（technical variance）有多少相关性。
+# 我们通常会看到一个波状（先上升后下降）的图，当平均表达量从0逐渐增加时，variance也会线性增加直到到了一个
+# 最大的variance（顶点），然而对于那些丰度非常高的gene，sampling noise effect会降低（因为不会有dropout吧）
+# 因此variance也会随之降低
 plot(var.out$mean, var.out$total, pch=16, cex=0.6, xlab="Mean log-expression", 
      ylab="Variance of log-expression")
 curve(var.fit$trend(x), col="dodgerblue", lwd=2, add=TRUE)
 cur.spike <- isSpike(sce)
 points(var.out$mean[cur.spike], var.out$total[cur.spike], col="red", pch=16)
+## Variance of normalized log-expression values for each gene in the 416B dataset, plotted against the mean log-expression
+## The blue line represents the mean-dependent trend fitted to the variances of the spike-in transcripts (red).
+## 蓝线是根据红色的spike-in你和出来的一条线。
 
 # We check the distribution of expression values for the genes with the largest biological components. 
 # This ensures that the variance estimate is not driven by one or two outlier cells (Figure 9).
+# 我们查看一下那些拥有最大的生物学variance的gene的表达情况，这可以让我们确认高variance并不是因为1个或几个outlier细胞
+# 所造成的。
 chosen.genes <- order(var.out$bio, decreasing=TRUE)[1:10]
 plotExpression(sce, features=rownames(var.out)[chosen.genes]) + fontsize
+## Violin plots of normalized log-expression values for the top 10 genes with the largest biological components in the 416B dataset
+## Each point represents the log-expression value in a single cell.
+
+
+#----------------------# Choosing the parameters of the trend fit 在拟合过程中如何选择参数 #----------------------#
+
+
+
 
 
 ################################ Removing the batch effect ################################
+# 这批数据来源于两盘细胞，在处理两盘细胞过程中哪怕一些细微的差别也会导致批次效应的产生（比如两盘细胞系统性的表达差异）
+# 我们可以使用limma包中的removeBatchEffect()函数来去除批次效应。这可以去除因为来自不同盘的细胞造成的差异，同时又保留了
+# 我们感兴趣的effect造成的不同细胞间的表达差异。
 library(limma)
 assay(sce, "corrected") <- removeBatchEffect(logcounts(sce), 
                                              design=model.matrix(~sce$Oncogene), batch=sce$Plate)
 assayNames(sce)
-
+## 手动的校正批次效应对下游not model-based的分析十分重要（包括clustering和降维）。然而如果一个方法能够接受一个design matrix
+## 那么block掉一些不感兴趣的因素是非常建议操作的，我们推荐那些方法而不是使用removeBatchEffect()。这是因为后者并没有将残差丢失
+## 的自由度考虑进去，也没有考虑blocking factor的估计值的不确定性。
+## removeBatchEffect()函数是构建了一个线性回归模型，并给予blocking factors和zero一个coefficient。然而使用这个方法的前提是
+## 每一个batch的细胞组成是已知的，并且不同batch之间是相同的。然而，对于大部分的scRNA-seq，造成差异的factors在不同batch之间是不同的
+## 并且是事先不知道的。这就促使我们使用更加优良的校正batch的方法，比如mnnCorrect().
 
 ############################## Denoising expression values using PCA ##############################
 # Once the technical noise is modelled, we can use principal components analysis (PCA) to remove random technical noise.
@@ -1242,6 +1295,11 @@ assayNames(sce)
 # variance is equal to the sum of technical components for all genes used in the PCA.
 
 # 在减少了背景噪声（某些基因）的基础上，对数据进行进一步降维（一般降维到原来维度的4-7%），以进一步去除背景噪音
+# 怎样来理解靠前的PC有用，靠后的PC没啥用呢？我们还是要从生物学角度出发进行思考：
+# 具有共调控模式的基因，往往聚集在/贡献在同一个biological process里面，而这些gene是造成细胞之间差别的主要因素，反映到
+# 数据上是造成数据差异的主要原因（或者说解释了数据主要的变异），这些process从理论上应该被靠前的PC捕获/识别到。相反，随机的
+# technical noise往往是独立影响单个gene，因此对于数据的差异贡献度小，会从靠后的PC捕获到。我们使用denoisePCA()函数来删除
+# 靠后的PC，until the total discarded variance is equal to the sum of technical components for all genes used in the PCA.
 # denoisePCA() will only use genes that have positive biological components, i.e., variances greater 
 # than the fitted trend. This guarantees that the total technical variance to be discarded will not 
 # be greater than the total variance in the data. 所以上面modeling technical noise一部是必须先执行的。
@@ -1249,17 +1307,23 @@ assayNames(sce)
 # No filtering is performed on abundance here, which ensures that PCs corresponding to rare subpopulations 
 # can still be detected. Discreteness is less of an issue as low-abundance genes also have lower variance, 
 # thus reducing their contribution to the PCA.
+# denoisePCA()函数只使用那些biological component为正值的基因，即variance要超过fitted trend。这能够确保总的被舍弃的techncial
+# variance不会大于数据的total variance。
 sce <- denoisePCA(sce, technical=var.fit$trend, assay.type="corrected")
 dim(reducedDim(sce, "PCA")) 
+## 返回的结果保存在SingleCellExperiment对象当中的reduceDims这个slot当中，它存储了针对每个细胞的PC score（可以用来画散点图了吧，
+## 理论上相当于坐标）。这一步操作能够消除technical noise并且尽量富集真正造成生物学影响的PC，这回对后续分析，比如clustering，增加
+## 分析的分辨率。
 
 # It is also possible to obtain a low-rank approximation of the original expression matrix, capturing 
 # the variance equivalent to the retained PCs. This is useful for denoising prior to downstream 
 # procedures that require gene-wise expression values.
+# 什么叫low-rank approximation？得问问，另外增加了lowrank这个表达slot。
 sce2 <- denoisePCA(sce, technical=var.fit$trend, 
                    assay.type="corrected", value="lowrank") 
 assayNames(sce2)
 
-######################## Data exploration with dimensionality reduction #######################
+######################## Data exploration with dimensionality reduction 数据降维后对数据进行探索 #######################
 # We visualize the relationships between cells by constructing pairwise PCA plots for the first three 
 # components (Figure 10). Cells with similar expression profiles should be located close together in 
 # the plot, while dissimilar cells should be far apart. In this case, we observe a clear separation 
@@ -1267,12 +1331,16 @@ assayNames(sce2)
 # 不同的颜色可以区分(induced or control)
 plotReducedDim(sce, use_dimred="PCA", ncomponents=3, 
                colour_by="Oncogene") + fontsize
+## Pairwise PCA plots of the first three PCs in the 416B dataset, constructed from normalized log-expression values of genes with positive biological components
+## Each point represents a cell, coloured according to oncogene induction status
 
 # By comparison, we observe no clear separation of cells by batch (Figure 11). This indicates that 
-# our batch correction step using removeBatchEffect() was successful. 不同颜色(batch)应该搅合在一起
+# our batch correction step using removeBatchEffect() was successful. 
+# 不同颜色(batch)应该搅合在一起，这说明我们通过batch的校正很好。
 plotReducedDim(sce, use_dimred="PCA", ncomponents=3, 
                colour_by="Plate") + fontsize
-
+## Pairwise PCA plots of the first three PCs in the 416B dataset, constructed from normalized log-expression values of genes with positive biological components
+## Each point represents a cell, coloured according to the plate of origin.
 
 # Another widely used approach for dimensionality reduction is the t-stochastic neighbour embedding 
 # (t-SNE) method (Van der Maaten and Hinton 2008). t-SNE tends to work better than PCA for separating 
@@ -1281,7 +1349,8 @@ plotReducedDim(sce, use_dimred="PCA", ncomponents=3,
 # However, this improvement comes at the cost of more computational effort and requires the user to
 # consider parameters such as the random seed and perplexity (see comments). We demonstrate the 
 # generation of t-SNE plots in Figure 12, using the low-rank approximation of the data to take 
-# advantage of the denoising step.
+# advantage of the denoising step. 
+# 我们需要自己定义perplexity
 run_args <- list(rand_seed=100, use_dimred="PCA")
 out5 <- plotTSNE(sce, run_args=c(run_args, perplexity=5),
                  colour_by="Oncogene") + fontsize + ggtitle("Perplexity = 5")
@@ -1293,17 +1362,28 @@ out20 <- plotTSNE(sce, run_args=c(run_args, perplexity=20),
                   colour_by="Oncogene") + fontsize + ggtitle("Perplexity = 20")
 
 multiplot(out5, out10, out20, cols=3)
+## t-SNE plots constructed from the denoised PCs in the 416B dataset, using a range of perplexity values
+## Each point represents a cell, coloured according to its oncogene induction status. Bars represent the coordinates of the cells on each axis.
 
 ## There are many other dimensionality reduction techniques that we do not consider here but could 
 ## also be used, e.g., multidimensional scaling, diffusion maps. These have their own advantages and 
 ## disadvantages – for example, diffusion maps (see plotDiffusionMap) place cells along a continuous 
 ## trajectory and are suited for visualizing graduated processes like differentiation
+## diffusionmap也是一种数据降维方法，是将细胞投射到一个连续的trajectory上面，这个方法很适合用来可视化连续的过程
+## 比如发育。
+plotDiffusionMap(sce, colour_by="Oncogene") # 仅仅作为一个演示。
 
 ## t-SNE is a stochastic method, so users should run the algorithm several times to ensure that the 
 ## results are representative. Scripts should set a seed (via the  rand_seed argument) to ensure 
 ## that the chosen results are reproducible. It is also advisable to test different settings of the 
 ## “perplexity” parameter as this will affect the distribution of points in the low-dimensional 
 ## space. A good guide on how to interpret t-SNE plots can be found at http://distill.pub/2016/misread-tsne/.
+## 在使用t-SNE的时候建议多测试几次来看看结果是不是稳定，主要要set.seed，这样能够确保结果是可以重复的。
+## 建议多尝试不同的perplexity，找到最佳的数值。
+
+
+
+
 ######################## Clustering cells into putative subpopulations ########################
 # 大致策略是先用PCA降维去噪，计算距离矩阵，根据距离矩阵来进行clustering。其中使用Ward’s criterion可减少
 # 同一个cluster的variance。然后使用动态剪切树的方法来进一步减少cluster的数量。然后在经过PCA降维的数据基础上
