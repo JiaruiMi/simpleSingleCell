@@ -1574,22 +1574,52 @@ saveRDS(file="416B_data.rds", sce)
 #
 #==============================================================================================
 
-######################################### Overview #########################################
+# This workflow will describe some analyses that were not covered in the previous workflows, using a variety of relevant 
+# datasets (Wilson et al. 2015; Islam et al. 2011; Buettner et al. 2015) generated using a range of technologies. It 
+# includes alternative parameter settings and options that are not usually used as default but may be helpful in some 
+# circumstances.
+
+
+
+######################################### 1. Overview #########################################
 # The previous workflows focused on analyzing single-cell RNA-seq data with “standard” procedures. 
 # However, a number of alternative parameter settings and strategies can be used at some steps of the 
 # workflow. This workflow describes a few of these alternative settings as well as the rationale 
 # behind choosing them instead of the defaults.
+# 这个workflow主要关注针对不同情况下，参数的选择以及背后的原理。
 
 
-##################################### Quality control on cells #####################################
+##################################### 2. Quality control on cells #####################################
+
+#----------------------# Assumptions of outlier identification 鉴定离群值的假设 #----------------------#
+# 我们排除离群值（细胞）基于的假设是大部分细胞的质量是不错的。另外某些方法可以让我们通过肉眼来观察细胞状态是否完好。
+# 但是在非常异质性的细胞群体当中，部分细胞的表达的RNA总量就是少，或者表达的基因种类就是少于其它细胞类型。这些细胞则
+# 会被默认为离群细胞而被舍弃掉，即使实际上它们的质量非常高。使用MAD能够在一定程度上缓解这个问题，因为一团非常异质性的
+# 细胞群会有非常高的variability，因而MAD的值就会比较大，因而会减少错误的排除高质量细胞的情况（其代价是减少排除低质量
+# 细胞的power）。但是我们必须要注意，基于离群值的方法过滤细胞在非常极端的情况下，比如细胞的类型差别巨大的时候，不是
+# 一种很好的方法。
+
+# 我们也可以针对不同的batch进行离群值的鉴定：
+# Systematic differences in the QC metrics can be handled to some extent using the batch= argument in the isOutlier() 
+# function. For example, setting batch to the plate of origin will identify outliers within each level of batch, using 
+# plate-specific median and MAD estimates. This is obviously useful for accommodating known differences in experimental 
+# processing, e.g., sequencing at different depth or different amounts of added spike-in RNA. We can also include 
+# biological factors in batch, if those factors could result in systematically fewer expressed genes or lower RNA content. 
+# However, this is not applicable in experiments where the factors are not known in advance.
 
 
-# Checking for discarded cell types
+#----------------------# Checking for discarded cell types 仔细排查那些被丢弃的细胞 #----------------------#
+
 ## We can diagnose loss of distinct cell types during QC by looking for differences in gene expression 
 ## between the discarded and retained cells (Figure 1). If the discarded pool is enriched for a 
 ## certain cell type, we should observe increased expression of the corresponding marker genes. No 
 ## systematic upregulation of genes is apparent in the discarded pool in Figure 1, indicating that 
 ## the QC step did not inadvertently filter out a cell type in the 416B dataset.
+## 我们可以通过比较丢弃的细胞和保留的细胞的表达差异来判断有没有排除某种类型的细胞。如果排除的细胞包括了某个
+## 特定的细胞类型，我们会发现那个丢弃细胞的marker gene在丢弃细胞中高表达，但是在保留的细胞中是低表达的，我们在
+## 下图中并没有看到一个系统性的在丢弃细胞中的上调基因，这也就以为着在QC步骤中排除的细胞并没有丢弃某个特定
+## 的细胞类型。
+setwd('/Users/mijiarui/Nature_Biotechnology_Paper/simpleSingleCell')
 library(SingleCellExperiment)
 sce.full.416b <- readRDS("416B_preQC.rds")
 
@@ -1615,6 +1645,9 @@ points(lost[is.mito], kept[is.mito], col="dodgerblue", pch=16)
 # By comparison, a more stringent filter in the PBMC dataset would remove the previously identified 
 # platelet population (see the previous workflow). This manifests in Figure 2 as a shift to the 
 # bottom-right for a number of genes, including PF4 and PPBP.
+# 相反在PBMC的数据集中，我们采用了更加激进的filter策略，从而把血小板给滤除了。在下方的散点图中我们看到有
+# 这么几个基因分布的位置朝着右下方漂移，这些基因分别是PF4和PPBP，也就意味着这几个gene在discarded cell中
+# 是富集的，但是在retained cells中是低表达的。
 sce.pbmc <- readRDS("pbmc_data.rds")
 wrong.keep <- sce.pbmc$total_counts >= 1000
 suppressWarnings({
@@ -1629,6 +1662,20 @@ plot(lost, kept, xlab="Average count (discarded)",
      ylab="Average count (retained)", log="xy", pch=16)
 platelet <- c("PF4", "PPBP", "SDPR")
 points(lost[platelet], kept[platelet], col="orange", pch=16)
+## Average counts across all discarded and retained cells in the PBMC dataset
+## Each point represents a gene, with platelet-related genes highlighted in orange.
+
+# 如果我们发现有一些细胞被错误的舍弃，我们能做的就是放宽过滤条件。我们可以通过增大isOutlier函数
+# 中的nmads=参数或者干脆就不filter。但是我们也需要铭记，保留过多的低质量细胞会增加所谓的显性异质
+# 性，这会影响后续的variance modeling和PCA，因为靠前的几个PC可能是反映的测序质量，而非生物学差异。
+# 最差的情况是，低质量的细胞会自动归位一个cluster，这对于结果的解释需要额外的关注。这也促使我们
+# 在一开始还是更倾向于采用比较严格的filtering策略。
+
+#----------------------# Alternative approaches to quality control QC的一些其它方法 #----------------------#
+# 使用fixed threshold
+## 比如我们可以设定排除library size小于100000和检出基因小于4000的细胞。这需要我们有足够的经验来判断合适的阈值
+## 的选取。我们需要牢记，针对read counts的阈值是不适用于UMI data的；反之亦然。即使使用的相同的protocol和系统
+## 每次/run的分析采用的threshold都可能是不同的，这是因为每次的RNA capture效率和测序深度是不一样的。
 
 
 # Using PCA-based outliers
@@ -1638,6 +1685,7 @@ points(lost[platelet], kept[platelet], col="orange", pch=16)
 # have aberrant technical properties compared to the (presumed) majority of high-quality cells. This 
 # is demonstrated below on a brain cell dataset from Tasic et al. (2016), using functions from the 
 # scater package (McCarthy et al. 2017).
+# 我们可以根据quality matrix对细胞进行PCA分析，outliers可能是低质量细胞。
 
 # Obtaining the dataset.
 library(scRNAseq)
@@ -1654,14 +1702,109 @@ sce.allen <- calculateQCMetrics(sce.allen)
 sce.allen <- runPCA(sce.allen, use_coldata=TRUE, detect_outliers=TRUE)
 table(sce.allen$outlier)
 
+## 基于PCA或者支持向量机SVM的方法能够更加有效的检测出低质量细胞，这是因为它们能够更加敏感的找到subtle pattern across many
+## quality metrics。但是在进行解释的时候，会有一定的困难；当然outliers也可以根据表达矩阵的PCA来实现，但是我们认为这个方法
+## 比较risky，这是因为我们有排除高质量的罕见细胞群的可能。
 
-################################## Normalizing based on spike-in coverage ##################################
+################################## 3. Normalizing based on spike-in coverage ##################################
 
 
-###################################### Detecting highly variable genes #####################################
+###################################### 4. Detecting highly variable genes #####################################
 
+#----------------------# Setting up the data 构建数据对象 #----------------------# 
 
-################################# Advanced modelling of the technical noise ################################
+# HVGs是真正表针细胞表达差异并造成生物学异质性的gene，因而理应作为下游分析的首选对象。
+# To demonstrate, we use data from haematopoietic stem cells (HSCs) (Wilson et al. 2015), generated using the 
+# Smart-seq2 protocol (Picelli et al. 2014) with ERCC spike-ins. Counts were obtained from NCBI GEO as a supplementary 
+# file using the accession number GSE61533. Our first task is to load the count matrix into memory. In this case, some 
+# work is required to retrieve the data from the Gzip-compressed Excel format.
+library(R.utils)
+gunzip("GSE61533_HTSEQ_count_results.xls.gz", remove=FALSE, overwrite=TRUE)
+library(gdata)
+all.counts <- read.xls('GSE61533_HTSEQ_count_results.xls', sheet=1, header=TRUE)
+rownames(all.counts) <- all.counts$ID
+all.counts <- as.matrix(all.counts[,-1])
+
+# We store the results in a SingleCellExperiment object and identify the rows corresponding to the spike-ins based on the row names.
+sce.hsc <- SingleCellExperiment(list(counts=all.counts))
+dim(sce.hsc)
+
+is.spike <- grepl("^ERCC", rownames(sce.hsc))
+isSpike(sce.hsc, "ERCC") <- is.spike
+summary(is.spike)
+
+# For each cell, we calculate quality control metrics using the calculateQCMetrics function as previously described. 
+# We filter out HSCs that are outliers for any metric, under the assumption that these represent low-quality libraries.
+sce.hsc <- calculateQCMetrics(sce.hsc)
+libsize.drop <- isOutlier(sce.hsc$total_counts, nmads=3, type="lower", log=TRUE)
+feature.drop <- isOutlier(sce.hsc$total_features, nmads=3, type="lower", log=TRUE)
+spike.drop <- isOutlier(sce.hsc$pct_counts_ERCC, nmads=3, type="higher")
+sce.hsc <- sce.hsc[,!(libsize.drop | feature.drop | spike.drop)]
+data.frame(ByLibSize=sum(libsize.drop), ByFeature=sum(feature.drop),
+           BySpike=sum(spike.drop), Remaining=ncol(sce.hsc))
+
+# We remove genes that are not expressed in any cell to reduce computational work in downstream steps.
+to.keep <- nexprs(sce.hsc, byrow=TRUE) > 0
+sce.hsc <- sce.hsc[to.keep,]
+summary(to.keep)
+
+# We apply the deconvolution method to compute size factors for the endogenous genes (Lun, Bach, and Marioni 2016). 
+# Separate size factors for the spike-in transcripts are also calculated, as previously discussed. We then calculate 
+# log-transformed normalized expression values for further use.
+sce.hsc <- computeSumFactors(sce.hsc)
+summary(sizeFactors(sce.hsc))
+
+sce.hsc <- computeSpikeFactors(sce.hsc, type="ERCC", general.use=FALSE)
+summary(sizeFactors(sce.hsc, "ERCC"))
+
+sce.hsc <- normalize(sce.hsc)
+
+#----------------------# Testing for significantly positive biological components #----------------------#
+# We fit a mean-variance trend to the spike-in transcripts to quantify the technical component of the variance, 
+# as previously described. The biological component for each gene is defined as the difference between its total 
+# variance and the fitted value of the trend (Figure 4).
+
+var.fit <- trendVar(sce.hsc, parametric=TRUE, loess.args=list(span=0.3))
+var.out <- decomposeVar(sce.hsc, var.fit)
+plot(var.out$mean, var.out$total, pch=16, cex=0.6, xlab="Mean log-expression", 
+     ylab="Variance of log-expression")
+curve(var.fit$trend(x), col="dodgerblue", lwd=2, add=TRUE)
+cur.spike <- isSpike(sce.hsc)
+points(var.out$mean[cur.spike], var.out$total[cur.spike], col="red", pch=16)
+## Variance of normalized log-expression values for each gene in the HSC dataset, plotted against the mean log-expression
+## The blue line represents the mean-dependent trend fitted to the variances of the spike-in transcripts (red).
+
+# 这边对HVG的定义是：biological component显著大于0，使用FDR为5%
+hvg.out <- var.out[which(var.out$FDR <= 0.05),]
+nrow(hvg.out)
+
+# We rank the results to focus on genes with larger biological components. This highlights an interesting aspect of 
+# the underlying hypothesis test, which is based on the ratio of the total variance to the expected technical variance. 
+# Ranking based on p-value tends to prioritize HVGs that are more likely to be true positives but, at the same time, 
+# less likely to be interesting. This is because the ratio can be very large for HVGs that have very low total variance 
+# and do not contribute much to the cell-cell heterogeneity.
+hvg.out <- hvg.out[order(hvg.out$bio, decreasing=TRUE),] 
+write.table(file="hsc_hvg.tsv", hvg.out, sep="\t", quote=FALSE, col.names=NA)
+head(hvg.out)
+
+# We check the distribution of expression values for the genes with the largest biological components. This ensures 
+# that the variance estimate is not driven by one or two outlier cells 
+fontsize <- theme(axis.text=element_text(size=12), axis.title=element_text(size=16))
+plotExpression(sce.hsc, features=rownames(hvg.out)[1:10]) + fontsize
+## Violin plots of normalized log-expression values for the top 10 genes with the largest biological components in the HSC dataset
+## Each point represents the log-expression value in a single cell.
+
+## There are many other strategies for defining HVGs, based on a variety of metrics:
+## the coefficient of variation (Brennecke et al. 2013; Kołodziejczyk et al. 2015; Kim et al. 2015)
+## the dispersion parameter in the negative binomial distribution (McCarthy, Chen, and Smyth 2012)
+## a proportion of total variability (Vallejos, Marioni, and Richardson 2015)
+## Some of these methods are available in scran – for example, see DM or technicalCV2 for calculations based on the 
+## coefficient of variation. Here, we use the variance of the log-expression values because the log-transformation 
+## protects against genes with strong expression in only one or two cells. This ensures that the set of top HVGs is 
+## not dominated by genes with (mostly uninteresting) outlier expression patterns.
+## log转换的目的是不使variance收到少数离群值的影响。
+
+################################# 5. Advanced modelling of the technical noise ################################
 
 # Loading the saved object.
 sce.416B <- readRDS("416B_data.rds") 
@@ -1693,11 +1836,112 @@ for (plate in levels(sce.416B.2$Plate)) {
 }
 
 lfit <- trendVar(sce.416B, design=model.matrix(~sce.416B$Plate))
-######################### Identifying correlated gene pairs with Spearman’s rho #########################
 
 
-######################### Using parallel analysis to choose the number of PCs #########################
+
+
+######################### 6. Identifying correlated gene pairs with Spearman’s rho #########################
+
+
+######################### 7. Using parallel analysis to choose the number of PCs #########################
+# 对于PC的选择，多少个为好呢？我们可以使用parallelPCA函数，它基于permutation，重复计算PCA来评估每个PC所能解释的
+# variance。重复的permutation可以让每个PC得到p-values，那些相比于零假设不能解释更多的variance的PC会被舍弃。
+
+# This is demonstrated using the batch-corrected expression values from the 416B dataset. To focus on relevant 
+# features, we only use genes with positive biological components from the variability analysis above. This 
+# procedure relies on random permutations, so setting the random seed is necessary for reproducible results.
 set.seed(1000)
 npcs <- parallelPCA(sce.416B, assay.type="corrected", 
                     subset.row=comb.out$bio > 0, value="n")
 as.integer(npcs)
+
+## 基于parallel的方法的优势：
+## Parallel analysis tends to yield more accurate estimates of the true rank of the matrix than  denoisePCA(). It 
+## is also applicable to expression values that have been transformed such that the gene-wise variances are distorted 
+## (and thus denoisePCA() cannot be used). This means that parallel analysis can be used to choose the number of PCs 
+## after certain non-linear operations like batch correction (Haghverdi et al. 2018). However, it is obviously much 
+## slower that denoisePCA() due to the need for multiple permutations.
+
+
+################################### 8. Blocking on the cell cycle phase ###################################
+# 对于研究其他的生物学问题的时候，细胞周期往往不是研究人员感兴趣的内容。然而细胞周期相关基因的表达可能会影响
+# 甚至掩盖其它生物学效应，并最终影响结果的解释。这还无法单一通过去除细胞周期marker gene来解除影响，这是因为
+# 这些细胞周期会影响到相当多其它的转录本。因此我们需要一个更加复杂的分析策略，我们使用TH2细胞的来作为一个演示
+# 这边数据已经经过了QC，normalization和log转换。
+library(readxl)
+incoming <- as.data.frame(read_excel("nbt.3102-S7.xlsx", sheet=1))
+rownames(incoming) <- incoming[,1]
+incoming <- incoming[,-1]
+incoming <- incoming[,!duplicated(colnames(incoming))] # Remove duplicated genes.
+sce.th2 <- SingleCellExperiment(list(logcounts=t(incoming)))
+
+# 我们使用cyclone来鉴定不同的细胞所处于的细胞周期状态。大部分的细胞处在G1期，少部分细胞位于其它期。
+library(org.Mm.eg.db)
+library(scran)
+ensembl <- mapIds(org.Mm.eg.db, keys=rownames(sce.th2), keytype="SYMBOL", column="ENSEMBL")
+
+set.seed(100)
+mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", 
+                                package="scran"))
+assignments <- cyclone(sce.th2, mm.pairs, gene.names=ensembl, assay.type="logcounts")
+
+plot(assignments$score$G1, assignments$score$G2M, 
+     xlab="G1 score", ylab="G2/M score", pch=16)
+## Cell cycle phase scores from applying the pair-based classifier on the TH2 dataset, where each point represents a cell
+
+# 我们可以根据phase score对细胞进行过滤，这种方法会不那么武断。The phase covariates in the design matrix will absorb any 
+# phase-related effects on expression such that they will not affect estimation of the effects of other experimental factors.
+# Users should also ensure that the phase score is not confounded with other factors of interest. For example, model fitting 
+# is not possible if all cells in one experimental condition are in one phase, and all cells in another condition are in a 
+# different phase. 这是增加了batch effect。
+
+design <- model.matrix(~ G1 + G2M, assignments$score)
+fit.block <- trendVar(sce.th2, design=design, parametric=TRUE, use.spikes=NA)
+dec.block <- decomposeVar(sce.th2, fit.block)
+
+library(limma)
+sce.th2.block <- sce.th2
+assay(sce.th2.block, "corrected") <- removeBatchEffect(
+  logcounts(sce.th2), covariates=design[,-1])
+
+sce.th2.block <- denoisePCA(sce.th2.block, technical=dec.block, 
+                            assay.type="corrected")
+dim(reducedDim(sce.th2.block, "PCA"))
+
+# Blocking的结果可以通过PCA来展现。在去除cell cycle的情况下，细胞在PC1和PC2上的分布与G1和G2/M期的打分高度相关；在去除cell cycle
+# 效应后，这种相关性就不存在了。
+sce.th2$G1score <- sce.th2.block$G1score <- assignments$score$G1
+sce.th2$G2Mscore <- sce.th2.block$G2Mscore <- assignments$score$G2M
+
+# Without blocking on phase score.
+fontsize <- theme(axis.text=element_text(size=12), axis.title=element_text(size=16))
+fit <- trendVar(sce.th2, parametric=TRUE, use.spikes=NA) 
+sce.th2 <- denoisePCA(sce.th2, technical=fit$trend)
+out <- plotReducedDim(sce.th2, use_dimred="PCA", ncomponents=2, colour_by="G1score", 
+                      size_by="G2Mscore") + fontsize + ggtitle("Before removal")
+
+# After blocking on the phase score.
+out2 <- plotReducedDim(sce.th2.block, use_dimred="PCA", ncomponents=2, 
+                       colour_by="G1score", size_by="G2Mscore") + fontsize + 
+  ggtitle("After removal")
+multiplot(out, out2, cols=2)
+## PCA plots before (left) and after (right) removal of the cell cycle effect in the TH2 dataset
+## Each cell is represented by a point with colour and size determined by the G1 and G2/M scores, respectively.
+
+# 另外，这个数据集中包含了处在分化发育不同阶段的好几种细胞，这是使用diffusion maps的绝佳情景，因为diffusion maps
+# 作为一种数据降维方法，把细胞投射到一个连续的process上头去。我们看到细胞分布在一个低维空间的轨迹上面。diffusion的
+# 第一个成分看起来能够对应于TH2细胞的分化，这是因为TH2的关键基因Gata3的表达量随着dimension1发生从左到右有规律并
+# 符合生物学情景的变化。
+plotDiffusionMap(sce.th2.block, colour_by="Gata3",
+                 run_args=list(use_dimred="PCA", sigma=25)) + fontsize # 我们倾向于使用larger sigma。
+plotDiffusionMap(sce.th2.block, colour_by="Gata3",
+                 run_args=list(use_dimred="PCA", sigma=5)) + fontsize
+## A diffusion map for the TH2 dataset, where each cell is coloured by its expression of Gata3
+## A larger sigma is used compared to the default value to obtain a smoother plot.
+
+
+
+
+
+
+
