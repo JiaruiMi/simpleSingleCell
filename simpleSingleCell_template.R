@@ -1070,17 +1070,27 @@ pheatmap::pheatmap(t(assignments$normalized.scores))
 ## it is phase-specific. Its lack of expression relative to other genes will still yield informative pairs, 
 ## and filtering them out would reduce power.
 
-################################### Examining gene-level expression metrics ###################################
+################################### Examining gene-level expression metrics 对表达数据矩阵的探索 ###################################
+
+#----------------------# Inspecting the most highly expressed genes 找到高表达的基因 #----------------------#
+
 # We examine the identities of the most highly expressed genes (Figure 4). This should generally be dominated by 
 # constitutively expressed transcripts, such as those for ribosomal or mitochondrial proteins. The presence of 
 # other classes of features may be cause for concern if they are not consistent with expected biology. For example, 
 # a top set containing many spike-in transcripts suggests that too much spike-in RNA was added during library preparation, 
 # while the absence of ribosomal proteins and/or the presence of their pseudogenes are indicative of suboptimal alignment.
-# 通常来讲，高表达的基因是和细胞生物学功能相关，或者是线粒体内或者核糖体基因。过好的spike-in不是好事情。
+# 通常来讲，高表达的基因是和细胞生物学功能相关，或者是线粒体内或者核糖体基因。过高的spike-in不是好事情。
+# 另外在高表达的gene里面，理论上应该有线粒体和核糖体相关基因以及他们的假基因，如果没有往往提示序列比对有问题。
 fontsize <- theme(axis.text=element_text(size=12), axis.title=element_text(size=16))
 plotQC(sce, type = "highest-expression", n=50) + fontsize  # 这一步可能会卡，最好先清一清内存空间
+## Percentage of total counts assigned to the top 50 most highly-abundant features in the 416B dataset
+## For each feature, each bar represents the percentage assigned to that feature for a single cell, while the circle 
+## represents the average across all cells. Bars are coloured by the total number of expressed features in each cell, 
+## while circles are coloured according to whether the feature is labelled as a control feature.
 
-# Filtering out low-abundance genes：
+
+#----------------------# Filtering out low-abundance genes 过滤掉低丰度的基因 #----------------------#
+
 # Several metrics can be used to define low-abundance genes. The most obvious is the average count for 
 # each gene, computed across all cells in the dataset. We calculate this using the calcAverage() function, 
 # which also performs some adjustment for library size differences between cells. We typically observe a 
@@ -1088,22 +1098,38 @@ plotQC(sce, type = "highest-expression", n=50) + fontsize  # 这一步可能会�
 # A minimum threshold can be applied to this value to filter out genes that are lowly expressed. The example 
 # below demonstrates how we could remove genes with average counts less than 1. The number of TRUE values in 
 # demo.keep corresponds to the number of retained rows/genes after filtering.
+# 低丰度的基因因为表达量太低，从统计学上不足以提供足够的证据来拒绝零假设，而它们带来的影响确实增加了多重假设
+# 检验的复杂性。因此在进行下游分析的时候需要排除这些低丰度基因（在进行细胞周期的鉴定之后）
+
+# 在pData矩阵中的好几列都可以被用来定义低丰度基因。最显而易见的是每个基因的平均count数(across all cells)。我们
+# 使用calcAverage()函数来进行计算，这个函数同时会对测序文库的大小进行一定程度的校正。通常情况下，在直方图中我们
+# 可以看到中等表达基因会形成一个peak，而在左侧的低丰度区会有一个平台出现。
 ave.counts <- calcAverage(sce, use_size_factors=FALSE)
 hist(log10(ave.counts), breaks=100, main="", col="grey80", 
      xlab=expression(Log[10]~"average count"))
+## 作者在进行直方图绘制的时候对其进行了log10的对数转换：Histogram of log-average counts for all genes in the 416B dataset
 
+# 我们可以在此基础上设定一个最小的阈值，下面的例子是过滤掉那些平均count数小于1的gene。在summary的表格中，标记为TRUE
+# 的gene是那些最终保留下来的gene/row
 demo.keep <- ave.counts >= 1
 filtered.sce <- sce[demo.keep,]
 summary(demo.keep)
 
+# 另外我们还会考虑每个gene分别在多少个细胞当中表达。这个数值通常会与gene的平均表达量是一致的，因为在大部分细胞中都有
+# 的gene，往往表达丰度也很高。那些在很少的细胞当中表达的gene往往不是我们感兴趣的内容，因为他们被检测到往往是因为扩增
+# 造成了artifact(当然我们也不能排除它们确实来自于非常少量的细胞中)。我们可以设定阈值来过滤掉那些只在<=n个细胞中表达
+# 的基因。我们使用scater包中的函数nexprs()来进行计算。
 # We also examine the number of cells that express each gene. This is closely related to the average 
 # count for most genes, as expression in many cells will result in a higher average (Figure 6). Genes 
 # expressed in very few cells are often uninteresting as they are driven by amplification artifacts 
 # (though they may also also arise from rare populations). We could then remove genes that are 
 # expressed in fewer than n cells. “Intensity of colour corresponds to the number of genes at any given location.”
 num.cells <- nexprs(sce, byrow=TRUE)
-smoothScatter(log10(ave.counts), num.cells, ylab="Number of cells", 
+smoothScatter(log10(ave.counts), num.cells, ylab="Number of cells",  # graphics基础包中的smoothScatter函数
               xlab=expression(Log[10]~"average count"))
+## The number of cells expressing each gene in the 416B dataset, plotted against the log-average count
+## Intensity of colour corresponds to the number of genes at any given location.
+
 
 # We remove genes that are not expressed in any cell to reduce computational work in downstream steps. 
 # Such genes provide no information and would be removed by any filtering strategy.
@@ -1112,22 +1138,58 @@ sce <- sce[to.keep,]
 summary(to.keep)
 
 
-############################## Normalization of cell-specific biases ##############################
-# Using the deconvolution method to deal with zero counts
+############################## Normalization of cell-specific biases 去除混杂因素 ##############################
+
+#----------------------# Using the deconvolution method to deal with zero counts 使用逆卷积方法去除零counts #----------------------#
+
+# Read counts与测序的时候的捕获效率以及测序深度有关，正确的normalization可以在进行下游分析之前去除来自细胞的bias。这一步
+# 的完成往往基于一个假设，即大部分的gene不存在差异表达，而在这些非差异表达的gene中出现系统性的count size的差别，我们认为
+# 是来自于bias，需用通过scaling的方式进行解决。更具体的说，使用size factor量化因子可以表征每个gene在每个测序文库（细胞）中
+# 需要scaling的程度。
+# 计算量化因子的方法有很多，比如DESeq2包中的estimateSizeFactorsFromMatrix函数，和来自edgeR包中的calcNormFactors函数。
+# 然而单细胞数据与bulk数据最大的差异在于单细胞数据的zera inflation。为了解决这个问题，我们将所有细胞的count 合起来从而
+# 增加count size，这样能够更加准确的估计量化因子。然后将合起来的量化因子在deconvolute（分解）into cell-based factors for 
+# cell-specific normalization.
 # Single-cell data can be problematic for these bulk data-based methods (DESeq2 and edgeR normalization) due 
 # to the dominance of low and zero counts. To overcome this, we pool counts from many cells to increase the 
 # count size for accurate size factor estimation (Lun, Bach, and Marioni 2016). Pool-based size factors are 
 # then “deconvolved” into cell-based factors for cell-specific normalization.
-sce <- computeSumFactors(sce)
+sce <- computeSumFactors(sce)  # 这样的一步操作完成了pooling和deconvoluting两个步骤
+?computeSumFactors  # Methods to normalize single-cell RNA-seq data by deconvolving size factors from cell pools.
+sizeFactors(sce)
 summary(sizeFactors(sce))
 
+# 我们通过下图发现量化因子和测序文库的大小是呈现正相关的。这也提示了大部分细胞之间的系统误差是来自于序列的捕获效率和测序深度的不同。
+# 细胞之间的差异表达会产生一个在测序总counts数和量化因子之间的非线性trend，并且increased scatter around the trend。 我们举一个例子：
+# 在癌基因激活以后量化因子会总体/系统性的减小，这与癌基因激活以后大部分基因出现上调，导致的组成行bias是有关的。
 plot(sce$total_counts/1e6, sizeFactors(sce), log="xy",
      xlab="Library size (millions)", ylab="Size factor",
      col=c("red", "black")[sce$Oncogene], pch=16)
 legend("bottomright", col=c("red", "black"), pch=16, cex=1.2,
        legend=levels(sce$Oncogene))
+## Size factors from deconvolution, plotted against library sizes for all cells in the 416B dataset
+## Axes are shown on a log-scale. Wild-type cells are shown in black and oncogene-induced cells are shown in red.
+
+## 尽管deconvolution方法处理大量zero的单细胞数据表现不错，但是如果zero实在太多，其结果也会是fail的，它的具体表现为产生
+## 了很多负的size factor。为了避免这样的问题，computeSumFactors函数会自动在计算量化因子之前过滤掉低丰度的gene，这个阈值
+## 手工来设定，使用参数min.mean=。经过测序文库校正后的average count低于这个阈值的会被过滤掉。
+## 在设定这个阈值的时候，对于read counts数据，可以设的相对高一点，比如1；而对于UMI数据，可以设的相对低一点，比如0.1.
+## 我们在进行gene QC之前，一定要先进行cell QC来过滤掉低expressed genes的细胞，如果不事先做这一步，那么computeSumFactors函数
+## 返回的结果在低质量细胞中会有大量的负值。
+
+## sizes参数用来指定将多少个细胞pool到一起来计算size factors。sizes越大，产生的估计结果就越准确，当然是以计算的时间和存储
+## 空间为代价的。当然，sizes不要小于20，这样能够确保在每个pool当中有足够的非零数值。作者在这边建议总的细胞数量不应该小于100。
+
+## 对于异质性非常明显的数据集，作者推荐使用粗的clustering方法。可以使用quickCluster函数，然后使用cluster参数将结果传递
+## 到computeSumFactor中。在每一个cluster当中的细胞会单独进行normalization，然后量化因子会重新scaled，最终使结果在不同的
+## cluster是可以比较的。这样做的好处是可以避免假设大部分的基因在细胞群体中是非差异表达的，在进行cluster的组间比较的时候才需要
+## 假设大部分基因是非差异表达的。这个方法会在上面UMI的数据（Amit Zeisel的数据集进行演示）。
+
+#----------------------# Computing separate size factors for spike-in transcripts 对spike-in计算量化因子 #----------------------#
 
 sce <- computeSpikeFactors(sce, type="ERCC", general.use=FALSE)
+
+#----------------------# Applying the size factors to normalize gene expression 使用量化因子来对基因表达量进行校正 #----------------------#
 
 sce <- normalize(sce)
 
