@@ -2329,6 +2329,8 @@ chosen2 <- rownames(combined)[head(order(combined$bio, decreasing=TRUE), 1000)]
 # We apply the mnnCorrect() function to the three batches to remove the batch effect, using the genes in chosen. This 
 # involves correcting their expression values so that all cells are comparable in the coordinate system of the first batch. 
 # The function returns a set of matrices containing corrected expression values, which we can use in downstream analyses.
+
+# scran中的mnnCorrect方法
 original <- list(logcounts(sce.e5601)[chosen,],
                  logcounts(sce.gse81076)[chosen,],
                  logcounts(sce.gse85241)[chosen,])
