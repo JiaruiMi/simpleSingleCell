@@ -2066,6 +2066,10 @@ curve(fit$trend(x), col="dodgerblue", add=TRUE)
 # 我们根据biological component来对gene进行排序，发现排名靠前的是Ins和Gcg
 # We order genes by decreasing biological component, revealing some usual suspects such as insulin and glucagon. 
 # We will be using this information later when performing feature selection prior to running mnnCorrect().
+dec.gse81076 <- dec
+dec.gse81076$Symbol <- rowData(sce.gse81076)$Symbol
+dec.gse81076 <- dec.gse81076[order(dec.gse81076$bio, decreasing=TRUE),]
+head(dec.gse81076)
 
 
 #----------------------# CEL-seq2, GSE85241 #----------------------# 
@@ -2272,10 +2276,328 @@ head(dec.e5601)
 
 ################################### 3. Feature selection across batches 在不同的batch当中选择feature ###################################
 
+#----------------------# Chosen 1 #----------------------#
+
+# To obtain a single set of features for batch selection, we take the top 1000 genes with the largest biological components 
+# from each batch. The intersection of this set across batches is defined as our feature set for MNN correction.
+# 我们对每一个study(batch)的biological component的前1000个gene进行筛选，然后对它们取交集，这些gene是进行MNN correction的batch
+# gene。
+top.e5601 <- rownames(dec.e5601)[seq_len(1000)]
+top.gse85241 <- rownames(dec.gse85241)[seq_len(1000)]
+top.gse81076 <- rownames(dec.gse81076)[seq_len(1000)]
+chosen <- Reduce(intersect, list(top.e5601, top.gse85241, top.gse81076))
+
+# Adding some gene symbols for interpretation.
+symb <- mapIds(org.Hs.eg.db, keys=chosen, keytype="ENSEMBL", column="SYMBOL")
+DataFrame(ID=chosen, Symbol=symb)
+
+
+#----------------------# Chosen 2 #----------------------#
+
+# 使用交集的策略是一个相对比较保守的策略，这要求同一个gene在多个研究/batch中都被认为是HVG才行。因此对于那些不是在所有
+# 研究/batch中都出现的cell type的marker gene是不可能出现在其中的。还有一种策略是使用combineVar()函数来计算每个基因在
+# 不同的研究/batch中的平均biological component。然后我们可以根据认为控制top多少个gene来认为定义这个feature set的gene。
+# Identifying genes that are annotated in all batches.
+in.all <- Reduce(intersect, list(rownames(dec.e5601), 
+                                 rownames(dec.gse85241), rownames(dec.gse81076)))
+
+# Setting weighted=FALSE so each batch contributes equally.
+combined <- combineVar(dec.e5601[in.all,], dec.gse85241[in.all,],
+                       dec.gse81076[in.all,], weighted=FALSE)
+chosen2 <- rownames(combined)[head(order(combined$bio, decreasing=TRUE), 1000)]
+
+
+# 我们在这里最终还是选择Chosen 1的方案，尽管它的结果非常的保守，但是我们能够更加focus在那些非常明显的造成biological difference
+# 的基因上面（across pancreas cell types）。这样我们可以规避一些在单个研究的内部来自不同供体的，引起不是我们感兴趣的差异的基因。
+# 我们做这一步是因为后续的mnnCorrect()并不能够校正这些gene，并且会让后续plot的解释变得复杂化。
+
+# Aaron在这边指出，当然我们可以使用mnnCorrect()在每个研究的内部对batch进行校正，然后再对不同的研究的batch进行校正。不过我们
+# 为了简化，还是通过上述的feature selection的方法来减少donor/plate造成的影响。
 
 
 ################################### 4. Performing MNN-based correction 使用MNN方法进行校正 ###################################
+# MNN算法的要义：
+# Consider a cell aa in batch AA, and identify the cells in batch BB that are nearest neighbours to aa in the expression space defined by 
+# the selected features. Repeat this for a cell bb in batch BB, identifying its nearest neighbours in AA. Mutual nearest 
+# neighbours are pairs of cells from different batches that belong in each other’s set of nearest neighbours. The reasoning 
+# is that MNN pairs represent cells from the same biological state prior to the application of a batch effect - see Haghverdi 
+# et al. (2018) for full theoretical details. Thus, the difference between cells in MNN pairs can be used as an estimate of 
+# the batch effect, the subtraction of which can yield batch-corrected values.
+# 根据选出来的feature gene的表达情况，在batch B中找到与batch A中的某一个细胞最近的细胞；反过来，在batch A中找到与batch B中的
+# 某个细胞最近的细胞。
+
+# We apply the mnnCorrect() function to the three batches to remove the batch effect, using the genes in chosen. This 
+# involves correcting their expression values so that all cells are comparable in the coordinate system of the first batch. 
+# The function returns a set of matrices containing corrected expression values, which we can use in downstream analyses.
+original <- list(logcounts(sce.e5601)[chosen,],
+                 logcounts(sce.gse81076)[chosen,],
+                 logcounts(sce.gse85241)[chosen,])
+?do.call
+corrected <- do.call(mnnCorrect, c(original, list(k=20, sigma=0.1)))
+str(corrected$corrected)
+## The k= parameter specifies the number of nearest neighbours to consider when defining MNN pairs. This should be 
+## interpreted as the minimum frequency of each cell type or state in each batch. Larger values will improve the 
+##  precision of the correction by increasing the number of MNN pairs, at the cost of reducing accuracy by allowing MNN 
+## pairs to form between cells of different type.
+
+## The sigma= parameter specifies how much information is shared between MNN pairs when computing the batch effect. 
+## Larger values will share more information, approaching a global correction for all cells in the same batch. Smaller 
+## values allow the correction to vary across cell types, which may be more accurate but comes at the cost of precision. 
+## The default sigma=1 is conservative and favours undercorrection, so lower values may be more suitable in many cases.
+
+## The order of the supplied batches does matter, as the first batch is treated as the reference coordinate system. We 
+## suggest setting the largest and/or most heterogeneous batch as the first. This ensures that sufficient MNN pairs will 
+## be identified between the first and other batches for stable correction.
+
+# The function also reports the MNN pairs that were identified in each successive batch. This may be useful for 
+# trouble-shooting, e.g., to check whether cells independently assigned to the same cell type are correctly identified 
+# as MNN pairs.
+corrected$pairs
 
 
 
 ################################### 5. Examining the effect of correction 查看校正后的结果 ###################################
+# 我们新建一个SingleCellExperiment对象来存储这些经过校正后的counts，同时包括了不同的batch的信息。
+omat <- do.call(cbind, original)
+mat <- do.call(cbind, corrected$corrected)
+colnames(mat) <- NULL
+sce <- SingleCellExperiment(list(original=omat, corrected=mat))
+colData(sce)$Batch <- rep(c("e5601", "gse81076", "gse85241"),
+                          lapply(corrected$corrected, ncol))
+sce
+
+# 我们使用t-SNE plot来查看batch correction后的结果。图左显示的是使用uncorrected data，细胞的分群情况以及不同的batch分到什么群里面
+# 图右显示的是经过correction的结果，我们看到来自不同batch的结果混到了一期，这与去除batch effect后的理想结果是一致的。值得注意的是
+# Sandberg的数据集似乎仍然在一定程度上与其它的数据集的结果分离。这可能是由于前者使用的是counts data而后两者使用的是UMI序列。
+osce <- runTSNE(sce, exprs_values="original", rand_seed=100)
+ot <- plotTSNE(osce, colour_by="Batch") + ggtitle("Original")
+csce <- runTSNE(sce, exprs_values="corrected", rand_seed=100)
+ct <- plotTSNE(csce, colour_by="Batch") + ggtitle("Corrected")
+multiplot(ot, ct, cols=2)
+## t-SNE plots of the pancreas datasets, before and after MNN correction
+## Each point represents a cell and is coloured by the batch of origin.
+
+# We colour by the expression of marker genes for known pancreas cell types to determine whether the correction is biologically 
+# sensible. Cells in the same visual cluster express the same marker genes (Figure 5), indicating that the correction maintains 
+# separation of cell types.
+# 接下来我们查看一下marker gene的分布，正常情况下，一个marker gene应该富集在一个特定的细胞类型，在t-SNE上应该是一团细胞，这样的结果
+# （batch correction的结果）才是有意义的。
+ct.gcg <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000115263") + ggtitle("Alpha cells (GCG)")
+ct.ins <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000254647") + ggtitle("Beta cells (INS)")
+ct.sst <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000157005") + ggtitle("Delta cells (SST)")
+ct.ppy <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000108849") + ggtitle("PP cells (PPY)")
+ct.anxa4 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000196975") + ggtitle("ANXA4")
+ct.epcam <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000119888") + ggtitle("EPCAM")
+ct.cftr <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000001626") + ggtitle("CFTR")
+multiplot(ct.gcg, ct.ins, ct.sst, ct.ppy, ct.anxa4, ct.epcam, ct.cftr , cols=3)
+
+library(EnsDb.Hsapiens.v86)
+HVG_3 <- mapIds(EnsDb.Hsapiens.v86, keys=rownames(csce), 
+                   column="SYMBOL", keytype="GENEID")
+HVG_3
+
+ct.tmem176a <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000002933") + ggtitle("TMEM176A")
+ct.tmem176b <- plotTSNE(csce, by_exprs_values="corrected", 
+                        colour_by="ENSG00000106565") + ggtitle("TMEM176B")
+ct.neurod1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000162992") + ggtitle("NEUROD1")
+ct.krt19 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000171345") + ggtitle("KRT19")
+ct.aldh1a1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                      colour_by="ENSG00000165092") + ggtitle("ALDH1A1")
+ct.anxa2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000182718") + ggtitle("ANXA2")
+ct.muc13 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000173702") + ggtitle("MUC13")
+ct.meg3 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000214548") + ggtitle("MEG3")
+ct.neat1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000245532") + ggtitle("NEAT1")
+ct.cela3a <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000142789") + ggtitle("CELA3A")
+ct.cela3b <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000219073") + ggtitle("CELA3B")
+ct.pdx1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000139515") + ggtitle("PDX1")
+ct.cdh1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000039068") + ggtitle("CDH1")
+ct.ctgf <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000118523") + ggtitle("CTGF")
+ct.malat1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000251562") + ggtitle("MALAT1")
+ct.hes1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000114315") + ggtitle("HES1")
+ct.ahcyl1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000168710") + ggtitle("AHCYL1")
+ct.wnt4 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000162552") + ggtitle("WNT4")
+ct.onecut2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000119547") + ggtitle("ONECUT2")
+ct.anxa5 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000164111") + ggtitle("ANXA5")
+ct.ca12 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000074410") + ggtitle("CA12")
+ct.gp2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000169347") + ggtitle("GP2")
+ct.aldh2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000111275") + ggtitle("ALDH2")
+ct.prdx1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000117450") + ggtitle("PRDX1")
+ct.ctrc <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000162438") + ggtitle("CTRC")
+ct.pcsk1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000175426") + ggtitle("PCSK1")
+ct.pcsk2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000125851") + ggtitle("PCSK2")
+ct.itgb1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000150093") + ggtitle("ITGB1")
+ct.erbb3 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000065361") + ggtitle("ERBB3")
+ct.actb <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000075624") + ggtitle("ACTB")
+ct.hla-b <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000234745") + ggtitle("HLA-B")
+ct.g6pc2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000152254") + ggtitle("G6PC2")
+ct.chga <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000100604") + ggtitle("chga")
+ct.cd44 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000026508") + ggtitle("CD44")
+ct.ttr <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000118271") + ggtitle("TTR")
+ct.pax6 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000007372") + ggtitle("PAX6")
+ct.igfbp7 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000163453") + ggtitle("IGFBP7")
+ct.olfm4 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000102837") + ggtitle("OLFM4")
+ct.eno1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000074800") + ggtitle("ENO1")
+ct.bace2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000182240") + ggtitle("BACE2")
+ct.myh9 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000100345") + ggtitle("MYH9")
+ct.muc1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000185499") + ggtitle("MUC1")
+ct.cpa1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000091704") + ggtitle("CPA1")
+ct.aqp1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000240583") + ggtitle("AQP1")
+ct.kiaa1324 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000116299") + ggtitle("KIAA1324")
+ct.gc <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000145321") + ggtitle("GC")
+ct.c3 <- plotTSNE(csce, by_exprs_values="corrected", 
+                  colour_by="ENSG00000125730") + ggtitle("C3")
+ct.cpa2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                  colour_by="ENSG00000158516") + ggtitle("CPA2")
+ct.aqp3 <- plotTSNE(csce, by_exprs_values="corrected", 
+                  colour_by="ENSG00000165272") + ggtitle("AQP3")
+ct.sox4 <- plotTSNE(csce, by_exprs_values="corrected", 
+                  colour_by="ENSG00000124766") + ggtitle("SOX4")
+ct.gdf15 <- plotTSNE(csce, by_exprs_values="corrected", 
+                  colour_by="ENSG00000130513") + ggtitle("GDF15")
+ct.egr1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000120738") + ggtitle("EGR1")
+ct.gdf15 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000130513") + ggtitle("GDF15")
+ct.mafb <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000204103") + ggtitle("MAFB")
+ct.dlk1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000185559") + ggtitle("DLK1")
+ct.krt8 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000170421") + ggtitle("KRT8")
+ct.mmp7 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000137673") + ggtitle("MMP7")
+ct.cldn4 <- plotTSNE(csce, by_exprs_values="corrected", 
+                    colour_by="ENSG00000189143") + ggtitle("CLDN4")
+ct.cldn1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000163347") + ggtitle("CLDN1")
+ct.pdk4 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000004799") + ggtitle("PDK4")
+ct.cpb1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000153002") + ggtitle("CPB1")
+ct.aldob <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000136872") + ggtitle("ALDOB")
+ct.acly <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000131473") + ggtitle("ACLY")
+ct.alb <- plotTSNE(csce, by_exprs_values="corrected", 
+                     colour_by="ENSG00000163631") + ggtitle("ALB")
+ct.col1a1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000108821") + ggtitle("COL1A1")
+ct.timp2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000185215") + ggtitle("TIMP2")
+ct.col1a2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000164692") + ggtitle("COL1A2")
+ct.syt7 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000011347") + ggtitle("SYT7")
+ct.cel <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000170835") + ggtitle("CEL")
+ct.crp <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000132693") + ggtitle("CRP")
+ct.gad2 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000136750") + ggtitle("GAD2")
+ct.tm4sf4 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000169903") + ggtitle("TM4SF4")
+ct.tm4sf1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000169908") + ggtitle("TM4SF1")
+ct.timp1 <- plotTSNE(csce, by_exprs_values="corrected", 
+                   colour_by="ENSG00000102265") + ggtitle("TIMP1")
+## t-SNE plots after MNN correction, where each point represents a cell and is coloured by its corrected expression of 
+## key marker genes for known cell types in the pancreas
+
+
+################################### 6. Using the corrected values in downstream analyses 使用校正后的数值进行下游的分析 ###################################
+# 我们要清楚经过corrected的value适用于哪些分析
+# MNN correction把来自不同batch的所有细胞都放到了同一个坐标系统中。这就意味着corrected values可以被用来定义细胞之间的距离
+# 从而进行数据降维和clustering。然而correction并没有保留数据原来的mean-variance relationship，因此我们并不推荐使用corrected
+# value来分析细胞的异质性。
+
+# MNN-corrected values总体来说并不适合进行差异基因表达分析，是基于一下几个原因。
+# 1）， The default parameters of mnnCorrect() do not return corrected values on the log-scale, but rather 
+# a cosine-normalized log-scale. This makes it difficult to interpret the effect size of DE analyses based 
+# on the corrected values.
+
+# 2），It is usually inappropriate to perform DE analyses on batch-corrected values, due to the failure to 
+# model the uncertainty of the correction. This usually results in loss of type I error control, i.e., more 
+# false positives than expected.
+
+# 在单细胞分析当中，大部分的差异基因分析都是在不同的cluster之间或者在trajectory中进行的。我们推荐使用corrected values
+# 进行clustering和trajectory分析，把数据转变回原来的log-expression value或者counts来进行差异基因表达分析。batch effect
+# 可以在model的时候作为一个blocking factor，这在使用limma或者edgeR都可以方便的实现。
+
+# MNN-correction的迭代处理：
+# Finally, the MNN-corrected values can be used for further correction with mnnCorrect(). This is useful in 
+# nested experimental designs involving multiple batches within each of multiple studies, much like the pancreas 
+# datasets described above. In such cases, it is reasonable to first perform the correction across batches within 
+# the same study (where there should be more similar cell types, and thus more MNN pairs). The batch-corrected 
+# values for each study can then be supplied to mnnCorrect() to remove batch effects between studies.
+
+# Comments from Aaron:
+
+## The most direct method of blocking on batch is to use an additive model with the batch of origin and the 
+## cluster/trajectory as separate factors. However, this assumes that the batch effect is constant for all 
+## clusters and/or along the trajectory. This assumption can be eliminated with an interaction model allowing 
+## for cluster-specific batch effects.
+## Users should set cos.norm.in=FALSE and cos.norm.out=FALSE when supplying  mnnCorrect() with MNN-corrected 
+## values. This ensures that the cosine normalization is only applied once, during the first round of MNN 
+## correction.
+
+
+
+
+
+
+
+
+
+
+
