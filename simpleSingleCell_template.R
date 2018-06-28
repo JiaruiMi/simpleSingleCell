@@ -1940,8 +1940,342 @@ plotDiffusionMap(sce.th2.block, colour_by="Gata3",
 ## A larger sigma is used compared to the default value to obtain a smoother plot.
 
 
+#==============================================================================================
+#
+#          4. Correcting batch effects in single-cell RNA-seq data 重点使用mnnCorrect()
+#
+#==============================================================================================
+
+################################### 1. Introduction 简介 ###################################
+# 比较大的scRNA-seq往往数据是来源于不同批次的测序数据。不同的批次存在一些不可控的因素导致批次之间存在系统性的误差
+# 比如操作人员不是同一个人，不同的批次使用的试剂的质量有差别等等。批次效应是导致数据出现异质性的主要原因，会掩盖
+# 真正的生物学差异，或者导致结果难以正确解读。
+
+# 采用计算校正的方法可以尽量减少批次效应带来的不利影响。然而，现有的方法中，比如removeBatchEffect函数假设细胞的组成
+# 要么是已知的或者是批次之间是完全一样的。此教程主要是通过mutual nearest neughbours (MNNs) 方法来识别批次效应。
+# mnnCorrect()方法并不依赖事先定义好的细胞组成或者要求批次之间的细胞组成相同，它只要求不同批次之间存在一部分细胞是一样
+# 的。我们通过三个人的单细胞胰岛数据（different groups and different protocols）来讲解这个方法的使用。
+
+# 注意单个研究就可能涉及到批次效应，但是整合不同的数据，处理批次效应的难度更大，所以我们通过这个案例，即能找到
+# 单个研究内的批次效应，也能分析不同研究之间的批次效应。
+
+################################### 2. Processing the different datasets 处理不同的数据集 ###################################
+
+#----------------------# CEL-seq，GSE81076  #----------------------# 
+
+# 加载数据：
+# 这个数据集来自Audenardden和Grun的CEL-seq方案，使用了UMI序列和spike-in序列。我们根据上面的GSE序号就能下载数据。
+# 这个数据集是比较大的；我们通过使用终端下的less，就能发现基因名和染色体名和整合在一起的，细胞也是一样的。也就是
+# 说这个文件包括data和metadata两个部分。
+gse81076.df <- read.table("GSE81076_D2_3_7_10_17.txt.gz", sep='\t', 
+                          header=TRUE, stringsAsFactors=FALSE, row.names=1)
+dim(gse81076.df)
+
+# 因为data和metadata是mixed together的，所以我们需要人工的从column name（列名）中提取metadata
+head(names(gse81076.df))
+donor.names <- sub("^(D[0-9]+).*", "\\1", colnames(gse81076.df))  # 不难发现我们的donor.names是有D和后面的一串数字构成了
+table(donor.names)
+
+plate.id <- sub("^D[0-9]+(.*)_.*", "\\1", colnames(gse81076.df)) # 不难发现plate.id是由donor.names和_之间的英文构成的
+table(plate.id)
+
+# 另一个比较棘手的事情是feature name在这边采用的是gene symbol，而不是非常唯一可靠的emsembl gene id。 我们将row name
+# 全部用ensembl gene id来进行替换，去除NA和重复的entry（spike-in例外）
+head(row.names(gse81076.df))
+gene.symb <- gsub("__chr.*$", "", rownames(gse81076.df)) # 去除了染色体的信息
+is.spike <- grepl("^ERCC-", gene.symb)
+table(is.spike)
+head(gene.symb)
+
+library(org.Hs.eg.db)
+gene.ids <- mapIds(org.Hs.eg.db, keys=gene.symb, keytype="SYMBOL", column="ENSEMBL")
+gene.ids[is.spike] <- gene.symb[is.spike]
+
+keep <- !is.na(gene.ids) & !duplicated(gene.ids)
+gse81076.df <- gse81076.df[keep,]
+rownames(gse81076.df) <- gene.ids[keep]
+summary(keep)
+gse81076.df[1:6,1:6]
+dim(gse81076.df) # 原先的dimension是20148，1728
+
+# 然后我们构建SingleCellExperiment对象并分别存储counts和metadata
+# This reduces the risk of book-keeping errors in later steps of the analysis. Note that we re-identify the spike-in 
+# rows, as the previous indices would have changed after the subsetting.
+library(SingleCellExperiment)
+sce.gse81076 <- SingleCellExperiment(list(counts=as.matrix(gse81076.df)),
+                                     colData=DataFrame(Donor=donor.names, Plate=plate.id),
+                                     rowData=DataFrame(Symbol=gene.symb[keep]))
+isSpike(sce.gse81076, "ERCC") <- grepl("^ERCC-", rownames(gse81076.df)) 
+sce.gse81076 
+
+
+# QC和normalization
+# 我们计算每个细胞的QC metrics并找到那些测序文库比较低，表达的基因数比较少和高ERCC比例的细胞（低质量细胞）
+library(scater)
+sce.gse81076 <- calculateQCMetrics(sce.gse81076, compact=TRUE)
+QC <- sce.gse81076$scater_qc   # QC metrics存储在scater_qc这个slot当中
+low.lib <- isOutlier(QC$all$log10_total_counts, type="lower", nmad=3)
+low.genes <- isOutlier(QC$all$log10_total_features_by_counts, type="lower", nmad=3)
+high.spike <- isOutlier(QC$feature_control_ERCC$pct_counts, type="higher", nmad=3)
+data.frame(LowLib=sum(low.lib), LowNgenes=sum(low.genes), 
+           HighSpike=sum(high.spike, na.rm=TRUE))
+
+# 我们排除QC metrics当中处于极端情况的细胞，这些细胞我们认为是低质量细胞并且应该被移除。当然一个更好的方法是
+# 实现查看这个QC metrics的分布，我们为了简单化这个workflow就跳过这一步。
+discard <- low.lib | low.genes | high.spike
+sce.gse81076 <- sce.gse81076[,!discard]
+summary(discard)
+
+# 我们使用deconvoluted的方法计算内源基因的size factor，这是使用quickCluster()函数来实现，好处是避免把非常不一样的
+# 细胞给pool到一起去（不同的cluster分别计算其对应的size factor）。
+library(scran)
+clusters <- quickCluster(sce.gse81076, min.mean=0.1)
+table(clusters)
+
+sce.gse81076 <- computeSumFactors(sce.gse81076, min.mean=0.1, clusters=clusters)
+summary(sizeFactors(sce.gse81076))
+
+# 我们也计算spike-in的size factor，注意我们需要将参数general.use = FALSE，这样能够确保计算得到的spike-in的size factor
+# 仅仅针对spike-in序列
+sce.gse81076 <- computeSpikeFactors(sce.gse81076, general.use=FALSE)
+summary(sizeFactors(sce.gse81076, "ERCC"))
+
+# 然后我们可以计算normalized log-expression value，这个结果可以用于后续的计算
+sce.gse81076
+sce.gse81076 <- normalize(sce.gse81076)
+sce.gse81076
+
+
+# 发现HVG：
+# 我们使用trendVar()和decomposeVar()函数来寻找HVG。这样做的好处是通过spike-in的variance能够模拟technical noise。我们设置
+# block= 来确保不同plate和donor的不感兴趣的差异并不会增大variance。 
+# The small discrepancy in the fitted trend in Figure 1 is caused by the fact that the trend is fitted robustly to the 
+# block-wise variances of the spike-ins, while the variances shown are averaged across blocks and not robust to outliers.
+block <- paste0(sce.gse81076$Plate, "_", sce.gse81076$Donor) # 我们能够察觉到的单个研究内的批次是来源于不同的供体和不同的plate（培养环境）
+fit <- trendVar(sce.gse81076, block=block, parametric=TRUE) 
+dec <- decomposeVar(sce.gse81076, fit)
+dec
+plot(dec$mean, dec$total, xlab="Mean log-expression", 
+     ylab="Variance of log-expression", pch=16)
+OBis.spike <- isSpike(sce.gse81076)
+points(dec$mean[is.spike], dec$total[is.spike], col="red", pch=16)
+curve(fit$trend(x), col="dodgerblue", add=TRUE)
+## Variance of normalized log-expression values for each gene in the GSE81076 dataset, plotted against the mean log-expression
+## The blue line represents the mean-dependent trend fitted to the variances of the spike-in transcripts (red).
+
+# 我们根据biological component来对gene进行排序，发现排名靠前的是Ins和Gcg
+# We order genes by decreasing biological component, revealing some usual suspects such as insulin and glucagon. 
+# We will be using this information later when performing feature selection prior to running mnnCorrect().
+
+
+#----------------------# CEL-seq2, GSE85241 #----------------------# 
+# 我们加载第二个数据集，还是来自于audenardden和Nuraro，使用的CEL-seq2方案，使用了UMI序列和spike-in序列
+gse85241.df <- read.table("GSE85241_cellsystems_dataset_4donors_updated.csv", 
+                          sep='\t', h=TRUE, row.names=1, stringsAsFactors=FALSE)
+dim(gse85241.df)
+gse85241.df[1:6,1:6]
+
+# 因为来自于同一个课题组，所以数据构架是一样的。同样我们需要拆分metadata
+donor.names <- sub("^(D[0-9]+).*", "\\1", colnames(gse85241.df))
+table(donor.names)
+
+plate.id <- sub("^D[0-9]+\\.([0-9]+)_.*", "\\1", colnames(gse85241.df))
+table(plate.id)
+
+# 同样我们需要将gene symbol改成ensembl gene id，去除NA和重复值
+gene.symb <- gsub("__chr.*$", "", rownames(gse85241.df))
+is.spike <- grepl("^ERCC-", gene.symb)
+table(is.spike)
+
+library(org.Hs.eg.db)
+gene.ids <- mapIds(org.Hs.eg.db, keys=gene.symb, keytype="SYMBOL", column="ENSEMBL")
+gene.ids[is.spike] <- gene.symb[is.spike]
+
+keep <- !is.na(gene.ids) & !duplicated(gene.ids)
+gse85241.df <- gse85241.df[keep,]
+rownames(gse85241.df) <- gene.ids[keep]
+summary(keep)
+
+# 构建SingleCellExperiment对象，存储data和metadata
+sce.gse85241 <- SingleCellExperiment(list(counts=as.matrix(gse85241.df)),
+                                     colData=DataFrame(Donor=donor.names, Plate=plate.id),
+                                     rowData=DataFrame(Symbol=gene.symb[keep]))
+isSpike(sce.gse85241, "ERCC") <- grepl("^ERCC-", rownames(gse85241.df)) 
+sce.gse85241 
 
 
 
+# QC和normalization
+# 同样计算每个细胞的QC metrics并且根据测序文库的大小，检测到的gene数和ERCC的比例过滤掉低质量细胞
+sce.gse85241 <- calculateQCMetrics(sce.gse85241, compact=TRUE)
+QC <- sce.gse85241$scater_qc
+low.lib <- isOutlier(QC$all$log10_total_counts, type="lower", nmad=3)
+low.genes <- isOutlier(QC$all$log10_total_features_by_counts, type="lower", nmad=3)
+high.spike <- isOutlier(QC$feature_control_ERCC$pct_counts, type="higher", nmad=3)
+data.frame(LowLib=sum(low.lib), LowNgenes=sum(low.genes), 
+           HighSpike=sum(high.spike, na.rm=TRUE))
+
+discard <- low.lib | low.genes | high.spike
+sce.gse85241 <- sce.gse85241[,!discard]
+summary(discard)
+
+# 分别计算内源基因和spike-in序列的size factor，通过他们来计算校正后的log-normalized expression value
+clusters <- quickCluster(sce.gse85241, min.mean=0.1, method="igraph")
+table(clusters)
+
+sce.gse85241 <- computeSumFactors(sce.gse85241, min.mean=0.1, clusters=clusters)
+summary(sizeFactors(sce.gse85241))
+
+sce.gse85241 <- computeSpikeFactors(sce.gse85241, general.use=FALSE)
+summary(sizeFactors(sce.gse85241, "ERCC"))
+
+sce.gse85241 <- normalize(sce.gse85241)
+
+# 找到HVG
+block <- paste0(sce.gse85241$Plate, "_", sce.gse85241$Donor)
+fit <- trendVar(sce.gse85241, block=block, parametric=TRUE) 
+dec <- decomposeVar(sce.gse85241, fit)
+plot(dec$mean, dec$total, xlab="Mean log-expression", 
+     ylab="Variance of log-expression", pch=16)
+is.spike <- isSpike(sce.gse85241)
+points(dec$mean[is.spike], dec$total[is.spike], col="red", pch=16)
+curve(fit$trend(x), col="dodgerblue", add=TRUE)
+## Variance of normalized log-expression values for each gene in the GSE85241 dataset, plotted against the mean log-expression
+## The blue line represents the mean-dependent trend fitted to the variances of the spike-in transcripts (red).
+
+# 根据biological component来进行排序，发现Ins和Gcg还是高排。
+dec.gse85241 <- dec
+dec.gse85241$Symbol <- rowData(sce.gse85241)$Symbol
+dec.gse85241 <- dec.gse85241[order(dec.gse85241$bio, decreasing=TRUE),]
+head(dec.gse85241)
 
 
+#----------------------# Smart-seq2, E-MTAB-5061  #----------------------#
+# 加载数据：
+# 我们最后一个数据来源是Sandberg实验室的，SMART-seq2的文库构建方案，包含ERCC spike-in；注意没有UMI序列，因为是全长转录本
+# We first read the table into memory, though this requires some effort as the file is even more unconventionally formatted than the two examples above.
+unzip("E-MTAB-5061.processed.1.zip")
+
+# Figuring out the number of libraries (-1 for the '#sample').
+header <- read.table("pancreas_refseq_rpkms_counts_3514sc.txt", 
+                     nrow=1, sep="\t", comment.char="", stringsAsFactors=FALSE)
+header[1:6,1:6]
+ncells <- ncol(header) - 1L
+
+# Loading only the gene names and the counts.
+col.types <- vector("list", ncells*2 + 2)
+col.types[1:2] <- "character"
+col.types[2+ncells + seq_len(ncells)] <- "integer"
+e5601.df <- read.table("pancreas_refseq_rpkms_counts_3514sc.txt", 
+                       sep="\t", colClasses=col.types)
+
+# Disentangling the gene names and the counts.
+gene.data <- e5601.df[,1:2]
+e5601.df <- e5601.df[,-(1:2)]
+colnames(e5601.df) <- as.character(header[1,-1])
+dim(e5601.df)
+
+# The gene metadata does contains unique GenBank identifiers, but these are transcript-level and concatenated together for 
+# each gene. Instead of trying to pull them apart, we perform the symbol-to-Ensembl conversion that was done for the previous 
+# datasets.
+is.spike <- grepl("^ERCC-", gene.data[,2])
+table(is.spike)
+
+library(org.Hs.eg.db)
+gene.ids <- mapIds(org.Hs.eg.db, keys=gene.data[,1], keytype="SYMBOL", column="ENSEMBL")
+gene.ids[is.spike] <- gene.data[is.spike,2]
+
+keep <- !is.na(gene.ids) & !duplicated(gene.ids)
+e5601.df <- e5601.df[keep,]
+rownames(e5601.df) <- gene.ids[keep]
+summary(keep)
+
+# At least the metadata is stored in a separate file, which makes it fairly straightforward to parse. We match the rows to 
+# the column names to ensure that the metadata and count table are in the same order.
+metadata <- read.table("E-MTAB-5061.sdrf.txt", header=TRUE, 
+                       sep="\t", check.names=FALSE, stringsAsFactors=FALSE)
+m <- match(colnames(e5601.df), metadata[["Assay Name"]])
+stopifnot(all(!is.na(m)))
+metadata <- metadata[m,]
+donor.id <- metadata[["Characteristics[individual]"]]
+table(donor.id)
+
+# 构建SingleCellExperiment对象
+sce.e5601 <- SingleCellExperiment(list(counts=as.matrix(e5601.df)),
+                                  colData=DataFrame(Donor=donor.id),
+                                  rowData=DataFrame(Symbol=gene.data[keep,1]))
+isSpike(sce.e5601, "ERCC") <- grepl("^ERCC-", rownames(e5601.df)) 
+sce.e5601  
+
+
+# QC和normalization
+# 同前面，我们进行cell QC，除了常规的根据测序文库的大小，检测到的gene数，高ERCC的比例以外，我们还需要找到near-zero spike-in
+# counts，这些counts是不能适应于spike-in normalization和technical noise modelling的。
+sce.e5601 <- calculateQCMetrics(sce.e5601, compact=TRUE)
+QC <- sce.e5601$scater_qc
+low.lib <- isOutlier(QC$all$log10_total_counts, type="lower", nmad=3)
+low.genes <- isOutlier(QC$all$log10_total_features_by_counts, type="lower", nmad=3) 
+high.spike <- isOutlier(QC$feature_control_ERCC$pct_counts, type="higher", nmad=3)
+low.spike <- isOutlier(QC$feature_control_ERCC$log10_total_counts, type="lower", nmad=2)
+data.frame(LowLib=sum(low.lib), LowNgenes=sum(low.genes), 
+           HighSpike=sum(high.spike, na.rm=TRUE), LowSpike=sum(low.spike))
+
+# Low-quality cells are defined as those with extreme values for these QC metrics and are removed.
+discard <- low.lib | low.genes | high.spike | low.spike
+sce.e5601 <- sce.e5601[,!discard]
+summary(discard)
+
+# 我们分别计算内源和spike-in序列的size factor，注意因为我们使用的SMART-seq2是根据的read counts data，所以我们的filtering的阈值
+# 是min.mean=1 来滤除低丰度的gene
+clusters <- quickCluster(sce.e5601, min.mean=1, method="igraph")
+table(clusters)
+
+sce.e5601 <- computeSumFactors(sce.e5601, min.mean=1, clusters=clusters)
+summary(sizeFactors(sce.e5601))
+
+sce.e5601 <- computeSpikeFactors(sce.e5601, general.use=FALSE)
+summary(sizeFactors(sce.e5601, "ERCC"))
+
+sce.e5601 <- normalize(sce.e5601)
+
+
+# 发现HVG：
+# We identify highly variable genes (HVGs) using trendVar() and decomposeVar(). Here, we need to fit the mean-variance trend 
+# separately to each donor, as the donor-to-donor variation in the mean-variance trend is more pronounced than that in the 
+# UMI datasets. This yields one fit for each donor in Figure 3.
+donors <- sort(unique(sce.e5601$Donor))
+is.spike <- isSpike(sce.e5601)
+par(mfrow=c(ceiling(length(donors)/2), 2), 
+    mar=c(4.1, 4.1, 2.1, 0.1))
+collected <- list()
+for (x in unique(sce.e5601$Donor)) {
+  current <- sce.e5601[,sce.e5601$Donor==x]
+  if (ncol(current)<2L) { next }
+  current <- normalize(current)
+  fit <- trendVar(current, parametric=TRUE) 
+  dec <- decomposeVar(current, fit)
+  plot(dec$mean, dec$total, xlab="Mean log-expression",
+       ylab="Variance of log-expression", pch=16, main=x)
+  points(fit$mean, fit$var, col="red", pch=16)
+  curve(fit$trend(x), col="dodgerblue", add=TRUE)
+  collected[[x]] <- dec
+}
+## Variance of normalized log-expression values for each gene in the E-MTAB-5601 dataset, plotted against the mean log-expression
+## Each plot corresponds to a donor, where the blue line represents the mean-dependent trend fitted to the variances of the spike-in transcripts (red).
+
+# We combine statistics across donors to consolidate them into a single set of results for this study. We then order genes 
+# by decreasing biological component. 数据合并，Ins和Gcg依然高排。
+dec.e5601 <- do.call(combineVar, collected)
+dec.e5601$Symbol <- rowData(sce.e5601)$Symbol
+dec.e5601 <- dec.e5601[order(dec.e5601$bio, decreasing=TRUE),]
+head(dec.e5601)
+
+################################### 3. Feature selection across batches 在不同的batch当中选择feature ###################################
+
+
+
+################################### 4. Performing MNN-based correction 使用MNN方法进行校正 ###################################
+
+
+
+################################### 5. Examining the effect of correction 查看校正后的结果 ###################################
