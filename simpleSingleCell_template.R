@@ -1706,8 +1706,96 @@ table(sce.allen$outlier)
 ## quality metrics。但是在进行解释的时候，会有一定的困难；当然outliers也可以根据表达矩阵的PCA来实现，但是我们认为这个方法
 ## 比较risky，这是因为我们有排除高质量的罕见细胞群的可能。
 
-################################## 3. Normalizing based on spike-in coverage ##################################
+################################## 3. Normalizing based on spike-in coverage 使用spike-in进行normalizatio ##################################
 
+#----------------------# Motivation 为什么要用spike-in进行normalization #----------------------# 
+
+# 在单细胞转录组测序中，进行scaling normalization的方法可以大致分成两类。第一类是基于一个假设，即样本之间有相当一部分基因是不存在差异表达的。
+# 第二类方法则是通过向细胞中加入相同数量和序列的spike-in来进行校正。其中使用spike-in的方法中，我们认为最后测序得到的各样品之间spike-in序列的
+# 的量的多少是来自于系统误差（cell-specific biases），比如序列捕获的效率和测序的深度。那在内源基因中排除spike-in的成分就可以减少这种系统误差。
+
+# 选择哪一种方法进行normalization是取决于你的生物学问题和你感兴趣的东西。如果大部分基因是差异表达的，同时你无法找到一组可靠稳定的管家基因集的时候
+# 使用spike-in的方法可能是唯一的去除cell-specific biases的方法。另外对于那些细胞中RNA总量在单个细胞中相差比较大，同时这也是你感兴趣的问题的时候，
+# 我们也应该使用spike-in（比如肿瘤）。在任何一个特定的细胞当中，内源基因的增加并不会影响spike-in序列的多少（在测序前实际的量和建库测序后的量）。
+# 因此，内源基因的多少的差别并不会成为spike-in定量过程中的biases，这也就以为着使用spike-in，并使用spike-in进行scaling并不会把细胞中RNA总量和表达
+# 丰度的属性给掩盖掉。With non-DE normalization, an increase in RNA content will systematically increase the expression of all genes in the non-DE 
+# subset, such that it will be treated as bias and removed.
+
+#----------------------# Setting up the data 构建数据对象 #----------------------# 
+# 我们使用的是Islam的数据集，包括mESCs和MEFs。
+# We load the counts into R, using colClasses to speed up read.table by pre-defining the type of each column. 
+# We also specify the rows corresponding to spike-in transcripts.
+library(SingleCellExperiment)
+counts <- read.table("GSE29087_L139_expression_tab.txt.gz", 
+                     colClasses=c(list("character", NULL, NULL, NULL, NULL, NULL, NULL), 
+                                  rep("integer", 96)), skip=6, sep='\t', row.names=1)
+
+is.spike <- grep("SPIKE", rownames(counts)) 
+sce.islam <- SingleCellExperiment(list(counts=as.matrix(counts)))
+isSpike(sce.islam, "spike") <- is.spike
+dim(sce.islam)
+
+# 我们通过calculateQCMetrics来过滤掉低质量细胞。我们滤除每个细胞类型的outliers。其中Negative control wells
+# 不包含任何细胞类型，因此用于质控（they should manifest as outliers for the various metrics)。在下游分析
+# 的时候需要被滤除。
+library(scater)
+sce.islam <- calculateQCMetrics(sce.islam)
+sce.islam$grouping <- rep(c("mESC", "MEF", "Neg"), c(48, 44, 4))
+
+libsize.drop <- isOutlier(sce.islam$total_counts, nmads=3, type="lower", 
+                          log=TRUE, batch=sce.islam$grouping)
+feature.drop <- isOutlier(sce.islam$total_features, nmads=3, type="lower", 
+                          log=TRUE, batch=sce.islam$grouping)
+spike.drop <- isOutlier(sce.islam$pct_counts_spike, nmads=3, type="higher", 
+                        batch=sce.islam$grouping)
+
+sce.islam <- sce.islam[,!(libsize.drop | feature.drop | 
+                            spike.drop | sce.islam$grouping=="Neg")]
+data.frame(ByLibSize=sum(libsize.drop), ByFeature=sum(feature.drop),
+           BySpike=sum(spike.drop), Remaining=ncol(sce.islam))
+
+
+#----------------------# Calculating spike-in size factors 计算spike-in的size factor 用来去除technical noise #----------------------# 
+# 我们使用computeSpikeFactors函数来计算spike-in的size factor。这个方式是计算每个细胞中spike-in测序得到的total counts，这个
+# size-factor就是基于细胞的总的spike-in count。我们使用general.use=TRUE参数，针对所有的spike-in
+library(scran)
+sce.islam <- computeSpikeFactors(sce.islam, general.use=TRUE)
+
+# 接下来我们使用normalize函数，它会使用spike-in based factors来计算normalized log-expression。
+# Unlike the previous analyses, we do not have to define separate size factors for the spike-in transcripts. This is 
+# because the relevant factors are already being used for all genes and spike-in transcripts when general.use=TRUE. 
+# (The exception is if the experiment uses multiple spike-in sets that behave differently and need to be normalized separately.)
+sce.islam
+sce.islam <- normalize(sce.islam)
+sce.islam
+
+# 为了比较，我们也计算deconvolution size factor，然后把它们和spike-in factors绘制在一张图上。
+# We observe a negative correlation between the two sets of values (Figure 3). This is because MEFs contain more endogenous RNA, 
+# which reduces the relative spike-in coverage in each library (thereby decreasing the spike-in size factors) but increases the 
+# coverage of endogenous genes (thus increasing the deconvolution size factors). If the spike-in size factors were applied to the 
+# counts, the expression values in MEFs would be scaled up while expression in mESCs would be scaled down. However, the opposite 
+# would occur if deconvolution size factors were used.
+par(mfrow = c(1,1))
+colours <- c(mESC="red", MEF="grey")
+deconv.sf <- computeSumFactors(sce.islam, sf.out=TRUE, cluster=sce.islam$grouping)
+plot(sizeFactors(sce.islam), deconv.sf, col=colours[sce.islam$grouping], pch=16, 
+     log="xy", xlab="Size factor (spike-in)", ylab="Size factor (deconvolution)")
+legend("bottomleft", col=colours, legend=names(colours), pch=16)
+## Size factors from spike-in normalization, plotted against the size factors from deconvolution for all cells in the mESC/MEF dataset
+## Axes are shown on a log-scale, and cells are coloured according to their identity. Deconvolution size factors were computed with small 
+## pool sizes owing to the low number of cells of each type.
+
+# Whether or not total RNA content is relevant – and thus, the choice of normalization strategy – depends on the biological hypothesis. 
+# In the HSC and brain analyses, variability in total RNA across the population was treated as noise and removed by non-DE normalization. 
+# This may not always be appropriate if total RNA is associated with a biological difference of interest. For example, Islam et al. (2011) 
+# observe a 5-fold difference in total RNA between mESCs and MEFs. Similarly, the total RNA in a cell changes across phases of the cell cycle 
+# (Buettner et al. 2015). Spike-in normalization will preserve these differences in total RNA content such that the corresponding biological 
+# groups can be easily resolved in downstream analyses.
+
+# We only use genes with average counts greater than 1 (as specified in min.mean) to compute the deconvolution size factors. This avoids 
+# problems with discreteness as mentioned in our previous uses of computeSumFactors.
+# Setting sf.out=TRUE will directly return the size factors, rather than a  SingleCellExperiment object containing those factors. This is 
+# more convenient when only the size factors are required for further analysis.
 
 ###################################### 4. Detecting highly variable genes #####################################
 
@@ -1806,7 +1894,39 @@ plotExpression(sce.hsc, features=rownames(hvg.out)[1:10]) + fontsize
 
 ################################# 5. Advanced modelling of the technical noise ################################
 
+#----------------------# Trend fitting when spike-ins are unavailable #----------------------#
+
+# 如果没有使用spike-in或者使用的spike-in的量不对，我们可以使用一个替代方案，即fit the trend to the variance estimates of the 
+# endogenous genes. 我们通过在trendVar函数中设定use.spikes=FALSE参数进行设定。
 # Loading the saved object.
+
+var.fit.nospike <- trendVar(sce.hsc, parametric=TRUE, 
+                            use.spikes=FALSE, loess.args=list(span=0.2))
+var.out.nospike <- decomposeVar(sce.hsc, var.fit.nospike)
+## 如何来进行结果的解释呢？我们最简单的一个解释就是大部分基因的变异并不是来自于差异表达。这就意味着technical component决定了
+## 基因表达variance的大部分成分。也就是说我们fitted trend可以认为是technical component的估计值。在下图中，我们看到trend和spike-in
+## 的variance是非常接近，或者说前者是穿过后者的，这也证明了我们的假设的正确性。
+plot(var.out.nospike$mean, var.out.nospike$total, pch=16, cex=0.6, 
+     xlab="Mean log-expression", ylab="Variance of log-expression")
+curve(var.fit.nospike$trend(x), col="dodgerblue", lwd=2, add=TRUE)
+points(var.out.nospike$mean[cur.spike], var.out.nospike$total[cur.spike], col="red", pch=16)
+## Variance of normalized log-expression values for each gene in the 416B dataset, plotted against the mean log-expression
+## The blue line represents the mean-dependent trend fitted to the variances of the endogenous genes (black), with spike-in transcripts shown in red.
+
+## 下面这句话要好好理解一下，尤其是从instead开始的部分：
+## If our assumption does not hold, the output of decomposeVar is more difficult to interpret. The fitted value of 
+## the trend can no longer be generally interpreted as the technical component, as it contains some biological variation 
+## as well. Instead, recall that the biological component reported by decomposeVar represents the residual for each 
+## gene over the majority of genes with the same abundance. One could assume that the variabilities of most genes are 
+## driven by constitutive “house-keeping” processes, which are biological in origin but generally uninteresting. Any 
+## gene with an increase in its variance is relatively highly variable and can be prioritized for further study.
+
+
+#----------------------# Blocking on uninteresting factors of variation #----------------------#
+# 使用block=这个参数：
+# 根据block后面的参数进行分组，分别fit mean and variance，然后fitting a single trend to the plate-specific means and variance of all
+# spike-in transcripts. 我们的假设是两个plate中细胞的trend（between mean and variance）应该是一致的。
+
 sce.416B <- readRDS("416B_data.rds") 
 
 # Repeating the trendVar() call.
@@ -1814,10 +1934,19 @@ var.fit <- trendVar(sce.416B, parametric=TRUE, block=sce.416B$Plate,
                     loess.args=list(span=0.3))
 
 matplot(var.fit$means, var.fit$vars, col=c("darkorange", "forestgreen"))
+## Plate-specific variance estimates for all spike-in transcripts in the 416B dataset, plotted against the plate-specific means
+## Each point represents a spike-in transcript, numbered by the plate from which the values were estimated.
 
+# 我们使用block=还有一个前提假设，即不同的plate的内源基因的丰度是差不多可比的。我们可以通过观察两个plate的内源基因的size factor
+# 的分布情况来说明。
 tmp.416B <- sce.416B
 tmp.416B$log_size_factor <- log(sizeFactors(sce.416B))
 plotColData(tmp.416B, x="Plate", y="log_size_factor")
+## Plate-specific distribution of the size factors for endogenous genes
+## However, these assumptions may not hold for other datasets. For example, if more spike-in RNA is added in a particular 
+## batch, the technical noise (and thus the trend) will decrease due to increased coverage. The mean log-expression of the 
+## spike-ins would also shift relative to the endogenous genes in that batch. The use of a single trend would subsequently 
+## be inappropriate, resulting in inaccurate estimates of the technical component for each gene.
 
 sce.416B.2 <- normalize(sce.416B, size_factor_grouping=sce.416B$Plate)
 comb.out <- multiBlockVar(sce.416B.2, block=sce.416B.2$Plate,
@@ -1841,7 +1970,37 @@ lfit <- trendVar(sce.416B, design=model.matrix(~sce.416B$Plate))
 
 
 ######################### 6. Identifying correlated gene pairs with Spearman’s rho #########################
+# 单细胞转录组分析的另一个用处是考察基因表达谱之间的correlation。我们可以计算spearman相关系数。
+# 为了演示，我们选取HSC数据集中的HLA分子，使用correlatePairs函数来找到显著性的correlation。 我们使用permutation的方法
+# 来判断显著性，对任意一对基因，零假设是两个基因的表达是相互独立的。我们通过shuffling 表达值，每次shuffle都会计算correlation
+# 其最终会形成一个NULL distribution，我们根据这个NULL distribution来计算我们实际观察到的correlation的p-value。
+set.seed(100)
+var.cor <- correlatePairs(sce.hsc, subset.row=grep("^H2-", rownames(sce.hsc)))
+head(var.cor)
 
+# 针对multiple testing，使用FDR为0.05.
+sig.cor <- var.cor$FDR <= 0.05
+summary(sig.cor)
+
+# 我们使用函数即可以计算制定的一对基因的correlation，也可以计算两个基因set中的所有gene对的correlation
+# 我们以组成AP-1的Fos和Jun基因为例：
+correlatePairs(sce.hsc, subset.row=cbind("Fos", "Jun"))
+
+# 我们通过下图能够看到两个基因之间存在中等程度的正相关。
+plotExpression(sce.hsc, features="Fos", x="Jun")
+##  Expression of Fos plotted against the expression of Jun for all cells in the HSC dataset
+
+## Aaron建议只选取感兴趣的gene集进行correlation test，比如HVG，不然结果的解释很难，有多重假设检验的问题，会产生
+## 很多uninteresting correlation
+
+## The correlatePairs function can also return gene-centric output by setting  per.gene=TRUE. This calculates a 
+## combined p-value (Simes 1986) for each gene that indicates whether it is significantly correlated to any other 
+## gene. From a statistical perspective, this is a more natural approach to correcting for multiple testing when 
+## genes, rather than pairs of genes, are of interest.
+
+## The Limited field indicates whether the p-value was lower-bounded by the number of permutations. If this is TRUE 
+## for any non-significant gene at the chosen FDR threshold, consider increasing the number of permutations to improve 
+## power.
 
 ######################### 7. Using parallel analysis to choose the number of PCs #########################
 # 对于PC的选择，多少个为好呢？我们可以使用parallelPCA函数，它基于permutation，重复计算PCA来评估每个PC所能解释的
