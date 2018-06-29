@@ -2594,6 +2594,7 @@ library(EnsDb.Hsapiens.v86)
 HVG_3 <- mapIds(EnsDb.Hsapiens.v86, keys=rownames(csce), 
                    column="SYMBOL", keytype="GENEID")
 HVG_3
+HVG_3[grep("^V", HVG_3)]
 
 ct.tmem176a <- plotTSNE(csce, by_exprs_values="corrected", 
                      colour_by="ENSG00000002933") + ggtitle("TMEM176A")
@@ -2779,6 +2780,14 @@ ct.slc25a5 <- plotTSNE(csce, by_exprs_values="corrected",
                       colour_by="ENSG00000005022") + ggtitle("SLC25A5")
 ct.kcnq10t1 <- plotTSNE(csce, by_exprs_values="corrected", 
                        colour_by="ENSG00000269821") + ggtitle("KCNQ1OT1")
+ct.vamp8 <- plotTSNE(csce, by_exprs_values="corrected", 
+                        colour_by="ENSG00000118640") + ggtitle("VAMP8")
+ct.vim <- plotTSNE(csce, by_exprs_values="corrected", 
+                        colour_by="ENSG00000026025") + ggtitle("VIM")
+ct.vgf <- plotTSNE(csce, by_exprs_values="corrected", 
+                        colour_by="ENSG00000128564") + ggtitle("VGF")
+
+
 ## t-SNE plots after MNN correction, where each point represents a cell and is coloured by its corrected expression of 
 ## key marker genes for known cell types in the pancreas
 
