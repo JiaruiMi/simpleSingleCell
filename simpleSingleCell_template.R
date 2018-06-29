@@ -1948,12 +1948,24 @@ plotColData(tmp.416B, x="Plate", y="log_size_factor")
 ## spike-ins would also shift relative to the endogenous genes in that batch. The use of a single trend would subsequently 
 ## be inappropriate, resulting in inaccurate estimates of the technical component for each gene.
 
+
+
+# fitting batch-specific trends，针对一项研究有多个batch的情况
+# For datasets containing multiple batches, an alternative strategy is to perform trend fitting and variance decomposition 
+# separately for each batch. This accommodates differences in the mean-variance trends between batches, especially if a different 
+# amount of spike-in RNA was added to the cells in each batch. We demonstrate this approach by treating each plate in the 416B 
+# dataset as a different batch, using the multiBlockVar() function. This yields plate-specific estimates of the biological and 
+# technical components for each gene.
 sce.416B.2 <- normalize(sce.416B, size_factor_grouping=sce.416B$Plate)
 comb.out <- multiBlockVar(sce.416B.2, block=sce.416B.2$Plate,
                           trend.args=list(parametric=TRUE, loess.args=list(span=0.4)))
 
+# Statistics are combined across multiple batches using the combineVar() function within  multiBlockVar(). This function computes 
+# a weighted average across batches for the means and variances, and applies Fisher’s method for combining the p-values. These 
+# results can be used in downstream functions such as denoisePCA, or for detecting highly variable genes (see below).
 head(comb.out[,1:6])
 
+# We visualize the quality of the batch-specific trend fits by extracting the relevant statistics from comb.out (Figure 9).
 par(mfrow=c(1,2))
 is.spike <- isSpike(sce.416B.2)
 for (plate in levels(sce.416B.2$Plate)) {
@@ -1963,9 +1975,28 @@ for (plate in levels(sce.416B.2$Plate)) {
   curve(metadata(cur.out)$trend(x), col="dodgerblue", lwd=2, add=TRUE)
   points(cur.out$mean[is.spike], cur.out$total[is.spike], col="red", pch=16)
 }
+## We visualize the quality of the batch-specific trend fits by extracting the relevant statistics from comb.out (Figure 9).
+## By fitting separate trends, we avoid the need to assume that a single trend is present across batches. However, this also 
+## reduces the precision of each trend fit, as less information is available within each batch. We recommend using block= as 
+## the default unless there is clear evidence for differences in the trends between batches.
 
+## We run normalize() with size_factor_grouping= to centre the size factors within each level of the blocking factor. This 
+## adjusts the size factors across cells in each batch so that the mean is equal to 1, for both the spike-in and gene-based 
+## sets of size factors. Log-normalized expression values are then recalculated using these centred size factors. This procedure 
+## ensures that the average abundances of the spike-in transcripts are comparable to the endogenous genes, avoiding problems 
+## due to differences in the quantity of spike-in RNA between batches. Otherwise, if the globally-centred size factors were used, 
+## there would be a systematic difference in the scaling of spike-in transcripts compared to endogenous genes. The fitted trend 
+## would then be shifted along the x-axis and fail to accurately capture the technical component for each gene.
+
+# Using the design= argument
+# For completeness, it is worth mentioning the design= argument in trendVar(). This will estimate the residual variance from a 
+# linear model fitted to the log-normalized expression values for each gene. The linear model can include blocking factors for 
+# known unwanted factors of variation, ensuring that they do not inflate the variance estimate. The technical component for each 
+# gene is obtained at the average abundance across all cells.
 lfit <- trendVar(sce.416B, design=model.matrix(~sce.416B$Plate))
-
+## We do not recommend using this approach for categorical blocking factors in one-way layouts. This is because it does not consider 
+## the mean of each blocking level, resulting in an inaccurate estimate of the technical component in the presence of a strong blocking 
+## effect. However, it is the only choice for dealing with real covariates or multiple blocking factors in an additive model.
 
 
 
