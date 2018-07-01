@@ -1706,7 +1706,7 @@ table(sce.allen$outlier)
 ## quality metrics。但是在进行解释的时候，会有一定的困难；当然outliers也可以根据表达矩阵的PCA来实现，但是我们认为这个方法
 ## 比较risky，这是因为我们有排除高质量的罕见细胞群的可能。
 
-################################## 3. Normalizing based on spike-in coverage 使用spike-in进行normalizatio ##################################
+################################## 3. Normalizing based on spike-in coverage 使用spike-in进行normalization ##################################
 
 #----------------------# Motivation 为什么要用spike-in进行normalization #----------------------# 
 
@@ -2348,6 +2348,7 @@ head(dec.gse85241)
 # 加载数据：
 # 我们最后一个数据来源是Sandberg实验室的，SMART-seq2的文库构建方案，包含ERCC spike-in；注意没有UMI序列，因为是全长转录本
 # We first read the table into memory, though this requires some effort as the file is even more unconventionally formatted than the two examples above.
+setwd('/Users/mijiarui/Nature_Biotechnology_Paper/simpleSingleCell')
 unzip("E-MTAB-5061.processed.1.zip")
 
 # Figuring out the number of libraries (-1 for the '#sample').
